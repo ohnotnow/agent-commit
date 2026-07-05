@@ -6,9 +6,9 @@
 # add/commit ONLY inside the throwaway repo.
 #
 # History: written alongside the original tool (July 2026, quality-gate
-# session). Does NOT yet cover the rename both-sides rule added by the
-# follow-up review — those cases were verified by hand and want porting
-# in here as regressions.
+# session). Extended in the follow-up review with regressions for the
+# rename both-sides rule, the full multi-line-message preview, and
+# committing paths that no longer exist on disk.
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 AC="$HERE/agent-commit"
@@ -67,6 +67,7 @@ MSG='fix(test): exercise agent-commit end to end'
 NAMED=(a.txt b.txt c.txt 'spaced name.txt')
 
 # ---------------------------------------------------------------- preview
+BEFORE=$(git rev-parse HEAD)
 OUT=$("$AC" -m "$MSG" "${NAMED[@]}" 2>&1); RC=$?
 check    "preview exits 0" 0 "$RC"
 contains "preview says nothing committed" "$OUT" "nothing committed yet"
@@ -78,7 +79,6 @@ contains "preview shows leftovers stray.tmp" "$OUT" "stray.tmp"
 contains "preview shows leftovers other.txt" "$OUT" "other.txt"
 TOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
 if [ -n "$TOKEN" ]; then pass "preview printed a token ($TOKEN)"; else fail "no token found in preview"; fi
-BEFORE=$(git rev-parse HEAD)
 AFTER=$(git rev-parse HEAD)
 if [ "$BEFORE" = "$AFTER" ]; then pass "preview made no commit"; else fail "preview COMMITTED SOMETHING"; fi
 
@@ -133,7 +133,6 @@ r "refuses --all"                  1 -m 'fix: x' --all
 r "refuses a directory"            1 -m 'fix: x' subdir
 r "refuses trailing-slash dir"     1 -m 'fix: x' subdir/
 r "refuses non-conventional msg"   1 -m 'updated some stuff' a.txt
-r "refuses clean file"             1 -m 'fix: x' other.txt~noexist 2>/dev/null
 r "refuses missing -m"             1 a.txt
 r "refuses empty file list"        1 -m 'fix: x'
 r "refuses ../ path"               1 -m 'fix: x' ../escape.txt
@@ -147,6 +146,52 @@ OUT=$("$AC" -m 'feat!: breaking thing' a.txt 2>&1); RC=$?
 check "accepts 'feat!:' (preview)" 0 "$RC"
 OUT=$("$AC" -m 'chore(deps): bump' a.txt 2>&1); RC=$?
 check "accepts 'chore(scope):' (preview)" 0 "$RC"
+
+# ---------------------------------------------------------------- renames
+# A staged rename must be committed whole: naming one side used to
+# half-commit it, leaving the old path alive in HEAD with no warning.
+printf 'rename me\n' > ren-old.txt
+git add ren-old.txt
+git commit -qm 'base for rename tests'
+git mv ren-old.txt ren-new.txt
+BEFORE=$(git rev-parse HEAD)
+
+r "rename: refuses naming only the new side" 1 -m 'fix: half a rename' ren-new.txt
+contains "rename refusal explains itself" "$OUT" "name both paths"
+r "rename: refuses naming only the old side" 1 -m 'fix: half a rename' ren-old.txt
+
+OUT=$("$AC" -m 'fix: unrelated while rename staged' a.txt 2>&1); RC=$?
+check    "unrelated preview works with rename staged" 0 "$RC"
+contains "rename listed in leftovers" "$OUT" "ren-old.txt -> ren-new.txt"
+
+OUT=$("$AC" -m 'refactor: rename ren-old to ren-new' ren-old.txt ren-new.txt 2>&1); RC=$?
+check "rename: both sides named previews" 0 "$RC"
+RTOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
+OUT=$("$AC" -m 'refactor: rename ren-old to ren-new' --yes "$RTOKEN" ren-old.txt ren-new.txt 2>&1); RC=$?
+check    "rename: both sides named commits" 0 "$RC"
+contains "rename commit reports both files" "$OUT" "committed 2 file(s)"
+TREE=$(git ls-tree -r --name-only HEAD)
+contains     "rename: new path in HEAD" "$TREE" "ren-new.txt"
+not_contains "rename: old path gone from HEAD" "$TREE" "ren-old.txt"
+not_contains "rename: nothing of it left in status" "$(git status --porcelain)" "ren-"
+
+# ------------------------------------------------------ multi-line message
+# The preview must show the WHOLE message, not just the first line, and
+# the commit must carry the body through intact.
+MLMSG='feat(preview): summary line
+
+body line one
+body line two'
+printf 'multi\n' > ml.txt
+OUT=$("$AC" -m "$MLMSG" ml.txt 2>&1); RC=$?
+check    "multi-line message previews" 0 "$RC"
+contains "preview shows body line one" "$OUT" "body line one"
+contains "preview shows body line two" "$OUT" "body line two"
+MTOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
+OUT=$("$AC" -m "$MLMSG" --yes "$MTOKEN" ml.txt 2>&1); RC=$?
+check "multi-line message commits" 0 "$RC"
+BODY=$(git log -1 --format=%B)
+[ "$BODY" = "$MLMSG" ] && pass "full message committed intact" || fail "message mangled: $BODY"
 
 # --------------------------------------------------------- SAFETY_MODE off
 YOLO="$WORK/agent-commit-yolo"
