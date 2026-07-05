@@ -1,0 +1,241 @@
+#!/bin/bash
+#
+# agent-commit — stage an explicit list of files and commit them with a
+# Conventional Commits message. Built for coding agents: it previews by
+# default and only commits when re-run with the token the preview printed.
+#
+# Usage:
+#   agent-commit -m "type(scope): summary" <file> [<file>...]          preview
+#   agent-commit -m "type(scope): summary" --yes TOKEN <file> [...]    commit
+#
+# Contract:
+#   * Explicit files only. Directories, '.', '-a', '-A' and '--all' are
+#     refused — name every file individually.
+#   * The first line of the message must follow the Conventional Commits
+#     spec: type(optional-scope): summary
+#   * The confirm token is a digest of the message plus each file's path
+#     and content, so the commit only happens if NOTHING changed between
+#     the preview and the confirm. If anything drifted, it refuses.
+#   * Only the named files are committed, even if other paths happen to
+#     be staged. It never pushes, pulls, or touches anything else.
+#
+# Exit codes: 0 preview shown or commit made; 1 refusal/usage error;
+#             2 token mismatch (drift since preview, or wrong token).
+#
+# Requirements: /bin/bash 3.2+, git 2.x. Nothing else.
+#
+# SAFETY_MODE: set to "off" to skip the preview/token two-step, so a bare
+# run commits immediately. This is deliberately an in-file constant rather
+# than an env var or flag: switching it off should be a loud, human act,
+# not something an agent can flip inline on the command it runs.
+SAFETY_MODE="on"
+
+PROG="agent-commit"
+NL='
+'
+
+die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+agent-commit — stage explicit files and commit with a Conventional Commits message.
+
+  agent-commit -m "type(scope): summary" <file> [<file>...]          preview
+  agent-commit -m "type(scope): summary" --yes TOKEN <file> [...]    commit
+
+The preview prints a confirm token; re-run the same command with
+--yes TOKEN to make the commit. The token is bound to the message and
+the files' content, so it refuses if anything changed in between.
+
+Explicit files only: directories, '.', '-a', '-A', '--all' are refused.
+EOF
+}
+
+# ---------------------------------------------------------------- arguments
+
+MSG=""
+TOKEN_GIVEN=""
+FILES=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -m)
+            shift
+            [ $# -gt 0 ] || die '-m needs a message'
+            MSG="$1"
+            ;;
+        --yes=*)
+            TOKEN_GIVEN="${1#--yes=}"
+            ;;
+        --yes)
+            shift
+            [ $# -gt 0 ] || die '--yes needs the token printed by the preview'
+            TOKEN_GIVEN="$1"
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -a|-A|--all)
+            die "refusing '$1': explicit files only — name each file individually"
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            die "unknown option '$1'"
+            ;;
+        *)
+            FILES=("${FILES[@]}" "$1")
+            ;;
+    esac
+    shift
+done
+while [ $# -gt 0 ]; do
+    FILES=("${FILES[@]}" "$1")
+    shift
+done
+
+[ -n "$MSG" ] || die 'a commit message is required: -m "type(scope): summary"'
+[ ${#FILES[@]} -gt 0 ] || die 'no files named — explicit files only, name each one'
+
+# ------------------------------------------------------------ message check
+
+FIRST_LINE=${MSG%%$'\n'*}
+CC_RE='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+'
+if ! [[ $FIRST_LINE =~ $CC_RE ]]; then
+    die "message must follow Conventional Commits, e.g. 'fix(parser): handle empty input' (got: '$FIRST_LINE')"
+fi
+
+# --------------------------------------------------------------- repo check
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || die 'not inside a git repository'
+
+# --------------------------------------------------------------- file checks
+
+# Dedupe while preserving order.
+DEDUPED=()
+for f in "${FILES[@]}"; do
+    seen=0
+    for d in "${DEDUPED[@]}"; do
+        [ "$d" = "$f" ] && { seen=1; break; }
+    done
+    [ $seen -eq 0 ] && DEDUPED=("${DEDUPED[@]}" "$f")
+done
+FILES=("${DEDUPED[@]}")
+
+LABELS=()
+for f in "${FILES[@]}"; do
+    case "$f" in
+        *"$NL"*) die 'refusing a path containing a newline' ;;
+        -*)      die "refusing '$f': paths may not start with '-'" ;;
+        .|./*)   die "refusing '$f': explicit files only — name each file individually" ;;
+        /*)      die "refusing absolute path '$f': use paths relative to the repo" ;;
+    esac
+    case "/$f/" in
+        */../*) die "refusing '$f': paths may not contain '..'" ;;
+    esac
+    [ -d "$f" ] && die "refusing directory '$f': explicit files only — name each file individually"
+
+    st=$(git status --porcelain -- "$f")
+    st=${st%%$'\n'*}
+    if [ -z "$st" ]; then
+        if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+            die "'$f' has no changes to commit"
+        else
+            die "'$f' does not exist and is not tracked by git"
+        fi
+    fi
+    xy=${st:0:2}
+    case "$xy" in
+        '??')  LABELS=("${LABELS[@]}" "new     ") ;;
+        *D*)   LABELS=("${LABELS[@]}" "deleted ") ;;
+        *)     LABELS=("${LABELS[@]}" "modified") ;;
+    esac
+done
+
+# -------------------------------------------------------------------- token
+
+compute_token() {
+    {
+        printf 'msg\0%s\0' "$MSG"
+        printf '%s\n' "${FILES[@]}" | LC_ALL=C sort | while IFS= read -r p; do
+            if [ -e "$p" ]; then
+                h=$(git hash-object "$p" 2>/dev/null) || h="unhashable"
+            else
+                h="deleted"
+            fi
+            printf 'f\0%s\0%s\0' "$p" "$h"
+        done
+    } | git hash-object --stdin | cut -c1-8
+}
+
+TOKEN=$(compute_token)
+[ -n "$TOKEN" ] || die 'failed to compute confirm token'
+
+# ---------------------------------------------------- leftover (untouched)
+
+ALL_STATUS=$(git status --porcelain)
+LEFTOVER=""
+LEFTOVER_COUNT=0
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    p=${line:3}
+    case "$p" in *' -> '*) p=${p##* -> } ;; esac
+    ours=0
+    for f in "${FILES[@]}"; do
+        [ "$p" = "$f" ] && { ours=1; break; }
+    done
+    if [ $ours -eq 0 ]; then
+        LEFTOVER="$LEFTOVER    $line$NL"
+        LEFTOVER_COUNT=$((LEFTOVER_COUNT + 1))
+    fi
+done <<EOF
+$ALL_STATUS
+EOF
+
+print_plan() {
+    printf '%s\n' "message:"
+    printf '    %s\n' "$MSG" | head -1
+    printf '%s\n' "files (${#FILES[@]}):"
+    i=0
+    while [ $i -lt ${#FILES[@]} ]; do
+        printf '    %s  %s\n' "${LABELS[$i]}" "${FILES[$i]}"
+        i=$((i + 1))
+    done
+    if [ $LEFTOVER_COUNT -gt 0 ]; then
+        printf '%s\n' "left untouched ($LEFTOVER_COUNT dirty/untracked paths, NOT part of this commit):"
+        printf '%s' "$LEFTOVER" | head -20
+        [ $LEFTOVER_COUNT -gt 20 ] && printf '    ... and %d more\n' $((LEFTOVER_COUNT - 20))
+    fi
+}
+
+# ------------------------------------------------------------------- commit
+
+do_commit() {
+    git add -- "${FILES[@]}" || die 'git add failed'
+    git commit -m "$MSG" -- "${FILES[@]}" || die 'git commit failed'
+    short=$(git rev-parse --short HEAD)
+    printf '\n%s: committed %d file(s) as %s\n' "$PROG" "${#FILES[@]}" "$short"
+    if [ $LEFTOVER_COUNT -gt 0 ]; then
+        printf '%s: %d dirty/untracked path(s) left untouched\n' "$PROG" "$LEFTOVER_COUNT"
+    fi
+}
+
+if [ -n "$TOKEN_GIVEN" ]; then
+    if [ "$TOKEN_GIVEN" != "$TOKEN" ]; then
+        printf '%s: token mismatch — the files or message changed since the preview (or the token is wrong).\n' "$PROG" >&2
+        printf '%s: nothing committed. Re-run without --yes to get a fresh preview.\n' "$PROG" >&2
+        exit 2
+    fi
+    do_commit
+elif [ "$SAFETY_MODE" = "off" ]; then
+    printf '%s: SAFETY_MODE is off — committing immediately.\n\n' "$PROG"
+    print_plan
+    do_commit
+else
+    printf '%s — preview only, nothing committed yet\n\n' "$PROG"
+    print_plan
+    printf '\nTo make exactly this commit, run the same command again with:  --yes %s\n' "$TOKEN"
+fi
