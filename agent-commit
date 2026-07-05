@@ -11,6 +11,9 @@
 # Contract:
 #   * Explicit files only. Directories, '.', '-a', '-A' and '--all' are
 #     refused — name every file individually.
+#   * Renames must be committed whole: if git has a rename staged, BOTH
+#     the old and the new path must be named, or it refuses. Naming one
+#     side would silently leave the old path alive in HEAD.
 #   * The first line of the message must follow the Conventional Commits
 #     spec: type(optional-scope): summary
 #   * The confirm token is a digest of the message plus each file's path
@@ -125,6 +128,30 @@ for f in "${FILES[@]}"; do
 done
 FILES=("${DEDUPED[@]}")
 
+# A staged rename must be committed whole: a pathspec-limited commit that
+# names only one side records half of it, and the old path silently
+# survives in HEAD. Refuse unless both paths (or neither) are named.
+ALL_STATUS=$(git status --porcelain)
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "${line:0:2}" in *R*) ;; *) continue ;; esac
+    rest=${line:3}
+    case "$rest" in *' -> '*) ;; *) continue ;; esac
+    r_old=${rest%% -> *}
+    r_new=${rest##* -> }
+    has_old=0
+    has_new=0
+    for f in "${FILES[@]}"; do
+        [ "$f" = "$r_old" ] && has_old=1
+        [ "$f" = "$r_new" ] && has_new=1
+    done
+    if [ $has_old -ne $has_new ]; then
+        die "'$r_old' -> '$r_new' is a rename: name both paths so the whole rename is committed"
+    fi
+done <<EOF
+$ALL_STATUS
+EOF
+
 LABELS=()
 for f in "${FILES[@]}"; do
     case "$f" in
@@ -176,7 +203,6 @@ TOKEN=$(compute_token)
 
 # ---------------------------------------------------- leftover (untouched)
 
-ALL_STATUS=$(git status --porcelain)
 LEFTOVER=""
 LEFTOVER_COUNT=0
 while IFS= read -r line; do
@@ -197,7 +223,9 @@ EOF
 
 print_plan() {
     printf '%s\n' "message:"
-    printf '    %s\n' "$MSG" | head -1
+    printf '%s\n' "$MSG" | while IFS= read -r mline; do
+        printf '    %s\n' "$mline"
+    done
     printf '%s\n' "files (${#FILES[@]}):"
     i=0
     while [ $i -lt ${#FILES[@]} ]; do
@@ -214,7 +242,19 @@ print_plan() {
 # ------------------------------------------------------------------- commit
 
 do_commit() {
-    git add -- "${FILES[@]}" || die 'git add failed'
+    # Only paths present on disk are added (needed for untracked files;
+    # harmless for tracked ones). Deleted paths — including the old side
+    # of a rename, which matches no pathspec for 'git add' — are recorded
+    # by the pathspec-limited commit itself.
+    ADD_LIST=()
+    for f in "${FILES[@]}"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            ADD_LIST=("${ADD_LIST[@]}" "$f")
+        fi
+    done
+    if [ ${#ADD_LIST[@]} -gt 0 ]; then
+        git add -- "${ADD_LIST[@]}" || die 'git add failed'
+    fi
     git commit -m "$MSG" -- "${FILES[@]}" || die 'git commit failed'
     short=$(git rev-parse --short HEAD)
     printf '\n%s: committed %d file(s) as %s\n' "$PROG" "${#FILES[@]}" "$short"
