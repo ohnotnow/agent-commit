@@ -52,6 +52,16 @@ $ agent-commit -m "fix(parser): handle empty input" --yes 4dd7f736 src/parser.sh
 
 Multi-line messages work as you'd expect, and the preview shows the whole message, body and all.
 
+### Messages from a file
+
+Inline `-m` gets fiddly as soon as the message outgrows one line: quoting, backticks, `$variables` the shell wants to expand. Borrowing curl's convention, `-m @path` reads the message from a file instead:
+
+```
+$ agent-commit -m @/tmp/scratch/commit.txt src/parser.sh
+```
+
+The confirm token digests the message text itself, so editing the file between preview and confirm counts as drift and is refused, the same as any other change. There's no ambiguity with literal messages: a valid message can never start with `@`, because its first line has to start with a Conventional Commits type.
+
 ### The rules
 
 - Explicit files only. Directories, `.`, `-a`, `-A` and `--all` are refused. Name each file.

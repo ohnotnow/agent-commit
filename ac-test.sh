@@ -193,6 +193,43 @@ check "multi-line message commits" 0 "$RC"
 BODY=$(git log -1 --format=%B)
 [ "$BODY" = "$MLMSG" ] && pass "full message committed intact" || fail "message mangled: $BODY"
 
+# ------------------------------------------------------- message from file
+# -m @path reads the message from a file (curl-style), dodging the
+# shell-escaping dance for multi-line messages. The token digests the
+# message text itself, so editing the file between preview and confirm
+# must be refused as drift.
+FMSG='feat(msgfile): summary from a file
+
+body with $dollar and `backticks` kept literal
+second body line'
+MSGFILE="$WORK/commit-msg.txt"
+printf '%s\n' "$FMSG" > "$MSGFILE"
+printf 'from file\n' > mf.txt
+BEFORE=$(git rev-parse HEAD)
+OUT=$("$AC" -m "@$MSGFILE" mf.txt 2>&1); RC=$?
+check    "message-from-file previews" 0 "$RC"
+contains "preview shows body from file" "$OUT" 'body with $dollar'
+FTOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
+
+printf '%s\n' "$FMSG" 'sneaky extra line' > "$MSGFILE"
+OUT=$("$AC" -m "@$MSGFILE" --yes "$FTOKEN" mf.txt 2>&1); RC=$?
+check "edited message file refused as drift" 2 "$RC"
+[ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "message drift: no commit" || fail "message drift: COMMITTED"
+
+printf '%s\n' "$FMSG" > "$MSGFILE"
+OUT=$("$AC" -m "@$MSGFILE" --yes "$FTOKEN" mf.txt 2>&1); RC=$?
+check "message-from-file commits once restored" 0 "$RC"
+BODY=$(git log -1 --format=%B)
+[ "$BODY" = "$FMSG" ] && pass "file message committed intact" || fail "file message mangled: $BODY"
+
+BEFORE=$(git rev-parse HEAD)
+printf 'again\n' >> mf.txt   # dirty file so only the message part can fail
+r "refuses missing message file" 1 -m "@$WORK/no-such-msg.txt" mf.txt
+: > "$WORK/empty-msg.txt"
+r "refuses empty message file"   1 -m "@$WORK/empty-msg.txt" mf.txt
+printf 'updated some stuff\n' > "$WORK/plain-msg.txt"
+r "file message still needs conventional first line" 1 -m "@$WORK/plain-msg.txt" mf.txt
+
 # --------------------------------------------------------- SAFETY_MODE off
 YOLO="$WORK/agent-commit-yolo"
 sed 's/^SAFETY_MODE="on"/SAFETY_MODE="off"/' "$AC" > "$YOLO" && chmod +x "$YOLO"

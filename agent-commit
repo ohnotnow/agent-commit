@@ -7,6 +7,7 @@
 # Usage:
 #   agent-commit -m "type(scope): summary" <file> [<file>...]          preview
 #   agent-commit -m "type(scope): summary" --yes TOKEN <file> [...]    commit
+#   agent-commit -m @path/to/message.txt <file> [<file>...]            message from a file
 #
 # Contract:
 #   * Explicit files only. Directories, '.', '-a', '-A' and '--all' are
@@ -16,6 +17,11 @@
 #     side would silently leave the old path alive in HEAD.
 #   * The first line of the message must follow the Conventional Commits
 #     spec: type(optional-scope): summary
+#   * '-m @path' (curl-style) reads the message from a file, avoiding
+#     the shell-escaping dance for multi-line messages. The token
+#     digests the message text itself, so editing the file between
+#     preview and confirm is caught as drift. A literal message can
+#     never start with '@' — the first line must start with a type.
 #   * The confirm token is a digest of the message plus each file's path
 #     and content, so the commit only happens if NOTHING changed between
 #     the preview and the confirm. If anything drifted, it refuses.
@@ -45,12 +51,15 @@ agent-commit — stage explicit files and commit with a Conventional Commits mes
 
   agent-commit -m "type(scope): summary" <file> [<file>...]          preview
   agent-commit -m "type(scope): summary" --yes TOKEN <file> [...]    commit
+  agent-commit -m @path/to/message.txt <file> [<file>...]            message from a file
 
 The preview prints a confirm token; re-run the same command with
 --yes TOKEN to make the commit. The token is bound to the message and
 the files' content, so it refuses if anything changed in between.
 
 Explicit files only: directories, '.', '-a', '-A', '--all' are refused.
+'-m @path' reads the commit message from a file — handy for multi-line
+messages without shell escaping.
 EOF
 }
 
@@ -66,6 +75,17 @@ while [ $# -gt 0 ]; do
             shift
             [ $# -gt 0 ] || die '-m needs a message'
             MSG="$1"
+            # curl-style: -m @path reads the message from a file. No
+            # collision with literal messages — a valid first line must
+            # start with a Conventional Commits type, never '@'.
+            case "$MSG" in
+                @*)
+                    msg_file=${MSG#@}
+                    [ -f "$msg_file" ] && [ -r "$msg_file" ] || die "cannot read message file '$msg_file'"
+                    MSG=$(cat "$msg_file")
+                    [ -n "$MSG" ] || die "message file '$msg_file' is empty"
+                    ;;
+            esac
             ;;
         --yes=*)
             TOKEN_GIVEN="${1#--yes=}"
