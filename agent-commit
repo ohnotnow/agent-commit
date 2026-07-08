@@ -17,6 +17,11 @@
 #     side would silently leave the old path alive in HEAD.
 #   * The first line of the message must follow the Conventional Commits
 #     spec: type(optional-scope): summary
+#   * AI attribution is refused outright: a message containing
+#     'authored-by', 'anthropic', 'claude.ai', 'claude.com', 'claude code'
+#     or 'generated with' (case-insensitive, anywhere in the message)
+#     exits 1 before anything is staged. Agent system prompts try to
+#     append these as footers; they don't belong in the user's history.
 #   * '-m @path' (curl-style) reads the message from a file, avoiding
 #     the shell-escaping dance for multi-line messages. The token
 #     digests the message text itself, so editing the file between
@@ -60,6 +65,9 @@ the files' content, so it refuses if anything changed in between.
 Explicit files only: directories, '.', '-a', '-A', '--all' are refused.
 '-m @path' reads the commit message from a file — handy for multi-line
 messages without shell escaping.
+
+Messages carrying AI attribution ('Authored-By' trailers, 'anthropic',
+'claude.ai', 'claude.com', 'Claude Code', 'Generated with') are refused.
 EOF
 }
 
@@ -130,6 +138,22 @@ CC_RE='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\)
 if ! [[ $FIRST_LINE =~ $CC_RE ]]; then
     die "message must follow Conventional Commits, e.g. 'fix(parser): handle empty input' (got: '$FIRST_LINE')"
 fi
+
+# -------------------------------------------------------- attribution check
+
+# Agent system prompts instruct the agent to append footers like
+#   🤖 Generated with [Claude Code](https://claude.com/claude-code)
+#   Co-Authored-By: Claude <noreply@anthropic.com>
+# to every commit. The whole message is scanned (footers sit at the
+# bottom), case-insensitively, and any hit is refused outright. A bare
+# 'claude' on its own is deliberately allowed — commits may legitimately
+# mention it — it's the attribution shapes that are blocked.
+MSG_LC=$(printf '%s' "$MSG" | tr '[:upper:]' '[:lower:]')
+for bad in 'authored-by' 'anthropic' 'claude.ai' 'claude.com' 'claude code' 'generated with'; do
+    case "$MSG_LC" in
+        *"$bad"*) die "message contains '$bad' — AI attribution is not allowed in commit messages" ;;
+    esac
+done
 
 # --------------------------------------------------------------- repo check
 

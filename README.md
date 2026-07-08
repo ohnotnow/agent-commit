@@ -66,6 +66,7 @@ The confirm token digests the message text itself, so editing the file between p
 
 - Explicit files only. Directories, `.`, `-a`, `-A` and `--all` are refused. Name each file.
 - The first line of the message must follow the Conventional Commits spec: `type(optional-scope): summary`, where type is one of feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert.
+- No AI attribution. A message containing `authored-by`, `anthropic`, `claude.ai`, `claude.com`, `claude code` or `generated with` (case-insensitive, anywhere in the message) is refused. Agents are told by their system prompts to append these as footers; this tool exists so they can't. A bare mention of `claude` on its own is allowed.
 - Renames must be committed whole. If git has a rename staged, both the old and the new path must be named, otherwise it refuses. Naming one side would silently leave the old path alive in HEAD.
 - Paths may not be absolute, contain `..`, start with `-`, or contain a newline.
 - A named file with no changes is refused rather than quietly skipped.

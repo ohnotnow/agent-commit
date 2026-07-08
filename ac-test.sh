@@ -8,7 +8,8 @@
 # History: written alongside the original tool (July 2026, quality-gate
 # session). Extended in the follow-up review with regressions for the
 # rename both-sides rule, the full multi-line-message preview, and
-# committing paths that no longer exist on disk.
+# committing paths that no longer exist on disk. AI-attribution refusals
+# added July 2026.
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 AC="$HERE/agent-commit"
@@ -229,6 +230,42 @@ r "refuses missing message file" 1 -m "@$WORK/no-such-msg.txt" mf.txt
 r "refuses empty message file"   1 -m "@$WORK/empty-msg.txt" mf.txt
 printf 'updated some stuff\n' > "$WORK/plain-msg.txt"
 r "file message still needs conventional first line" 1 -m "@$WORK/plain-msg.txt" mf.txt
+
+# ------------------------------------------------ AI attribution refusals
+# Agent system prompts append footers like
+#   🤖 Generated with [Claude Code](https://claude.com/claude-code)
+#   Co-Authored-By: Claude <noreply@anthropic.com>
+# to commit messages. Any attribution shape is refused, case-insensitively,
+# wherever it sits in the message — including arriving via -m @file.
+BEFORE=$(git rev-parse HEAD)
+FOOTER_MSG='feat: something genuinely useful
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>'
+r "refuses the standard agent footer" 1 -m "$FOOTER_MSG" mf.txt
+contains "attribution refusal names the match" "$OUT" "AI attribution"
+
+r "refuses Co-Authored-By trailer"  1 -m 'fix: x
+
+Co-Authored-By: A Robot <bot@example.com>' mf.txt
+r "refuses AUTHORED-BY any case"    1 -m 'fix: x
+
+AUTHORED-BY: SOMEONE' mf.txt
+r "refuses anthropic mention"       1 -m 'fix: x as suggested by Anthropic' mf.txt
+r "refuses claude.ai link"          1 -m 'fix: see https://claude.ai/chat/abc' mf.txt
+r "refuses claude.com link"         1 -m 'fix: see https://claude.com/claude-code' mf.txt
+r "refuses Claude Code mention"     1 -m 'fix: tidy up after claude code session' mf.txt
+r "refuses generated-with line"     1 -m 'fix: x
+
+Generated with SomeTool' mf.txt
+
+printf 'fix: sneaky\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n' > "$WORK/attrib-msg.txt"
+r "refuses attribution via @file"   1 -m "@$WORK/attrib-msg.txt" mf.txt
+
+# a bare 'claude' is deliberately allowed — it's attribution that's blocked
+OUT=$("$AC" -m 'feat: add claude skill notes' mf.txt 2>&1); RC=$?
+check "bare 'claude' mention still previews" 0 "$RC"
 
 # --------------------------------------------------------- SAFETY_MODE off
 YOLO="$WORK/agent-commit-yolo"
