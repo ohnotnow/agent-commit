@@ -5,6 +5,7 @@
 #
 # Usage:
 #   agent-github owners
+#   agent-github auth-status
 #   agent-github publish --repo OWNER/NAME --public|--private \
 #       --description "Short description"
 #   agent-github publish --repo OWNER/NAME --public|--private \
@@ -13,6 +14,10 @@
 # Contract:
 #   * `owners` exposes only the authenticated GitHub login and organisation
 #     logins available to it. It is read-only.
+#   * `auth-status` passes through `gh auth status` so an agent denied raw
+#     gh can still tell an authentication problem from a GitHub outage. It
+#     takes no arguments and forwards no flags, so gh's --show-token can
+#     never be reached through it; tokens stay masked.
 #   * `publish` creates one new repository and pushes the current branch.
 #     It cannot edit or delete repositories, push to an existing remote,
 #     publish tags, or pass arbitrary arguments through to gh.
@@ -39,6 +44,8 @@ agent-github — safely publish one new GitHub repository.
 
   agent-github owners
 
+  agent-github auth-status
+
   agent-github publish --repo OWNER/NAME --public|--private \
       --description "Short description"
 
@@ -46,6 +53,8 @@ agent-github — safely publish one new GitHub repository.
       --description "Short description" --yes TOKEN
 
 `owners` lists the authenticated account and available organisations.
+
+`auth-status` shows the gh CLI's authentication state, with tokens masked.
 
 `publish` previews a single repository creation and initial push. Re-run the
 same command with the printed token to perform it. The source repository must
@@ -61,16 +70,31 @@ need_gh() {
     command -v gh >/dev/null 2>&1 || die 'gh CLI is required but was not found on PATH'
 }
 
+# Run a gh read call keeping stdout and stderr apart, so a failure can
+# report gh's actual error. An HTTP 503 during a GitHub outage reads very
+# differently from an authentication problem, and the agent running this
+# may have no other way to see the difference.
+gh_read() {
+    gh_err_file=$(mktemp) || die 'could not create a temporary file'
+    GH_OUT=$(gh "$@" 2>"$gh_err_file")
+    gh_rc=$?
+    GH_ERR=$(cat "$gh_err_file")
+    rm -f "$gh_err_file"
+    return "$gh_rc"
+}
+
 load_owners() {
     need_gh
-    AUTH_OWNER=$(gh api user --jq '.login' 2>/dev/null) ||
-        die 'could not read the authenticated GitHub account; run gh auth status'
+    gh_read api user --jq '.login' ||
+        die "could not read the authenticated GitHub account${GH_ERR:+: $GH_ERR}; try: agent-github auth-status"
+    AUTH_OWNER=$GH_OUT
     case "$AUTH_OWNER" in
         ''|*"$NL"*) die 'gh returned an invalid authenticated account login' ;;
     esac
 
-    ORG_OWNERS=$(gh api user/memberships/orgs --paginate --jq '.[].organization.login' 2>/dev/null) ||
-        die 'could not read GitHub organisation memberships'
+    gh_read api user/memberships/orgs --paginate --jq '.[].organization.login' ||
+        die "could not read GitHub organisation memberships${GH_ERR:+: $GH_ERR}"
+    ORG_OWNERS=$GH_OUT
 }
 
 print_owners() {
@@ -269,6 +293,15 @@ case "${1:-}" in
         shift
         [ $# -eq 0 ] || die 'owners takes no arguments'
         print_owners
+        ;;
+    auth-status)
+        shift
+        [ $# -eq 0 ] || die 'auth-status takes no arguments'
+        need_gh
+        # Nothing is forwarded, so gh's --show-token is unreachable and the
+        # token stays masked. gh's own exit code (1 on auth trouble) is the
+        # exit code of this command.
+        gh auth status
         ;;
     publish)
         shift

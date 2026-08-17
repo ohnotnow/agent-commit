@@ -19,7 +19,23 @@ cat > "$FAKE_BIN/gh" <<'EOF'
 #!/bin/bash
 case "${1:-} ${2:-}" in
     'api user')
+        if [ "${AG_FAKE_API_FAIL:-0}" = "1" ]; then
+            printf 'HTTP 503: No server is currently available (https://api.github.com/user)\n' >&2
+            exit 1
+        fi
         printf '%s\n' "${AG_FAKE_USER:-test-user}"
+        exit 0
+        ;;
+    'auth status')
+        if [ $# -gt 2 ]; then
+            printf 'unexpected extra auth status arguments: %s\n' "$*" >&2
+            exit 90
+        fi
+        if [ "${AG_FAKE_AUTH_FAIL:-0}" = "1" ]; then
+            printf 'X github.com: authentication failed\n' >&2
+            exit 1
+        fi
+        printf 'github.com\n  Logged in to github.com account %s (keyring)\n  - Token: gho_************\n' "${AG_FAKE_USER:-test-user}"
         exit 0
         ;;
     'api user/memberships/orgs')
@@ -117,6 +133,25 @@ contains "owners shows authenticated login" "$OUT" "test-user"
 contains "owners shows first organisation" "$OUT" "test-org"
 contains "owners shows second organisation" "$OUT" "another-org"
 not_contains "owners does not expose profile fields" "$OUT" "email"
+
+OUT=$(AG_FAKE_API_FAIL=1 "$AG" owners 2>&1); RC=$?
+check "owners fails when the API is down" 1 "$RC"
+contains "owners surfaces gh's real error" "$OUT" "HTTP 503"
+contains "owners points at auth-status" "$OUT" "agent-github auth-status"
+not_contains "owners no longer suggests raw gh" "$OUT" "run gh auth status"
+
+# ---------------------------------------------------------- auth-status
+OUT=$("$AG" auth-status 2>&1); RC=$?
+check "auth-status succeeds" 0 "$RC"
+contains "auth-status passes gh's output through" "$OUT" "Logged in to github.com account test-user"
+
+OUT=$("$AG" auth-status --show-token 2>&1); RC=$?
+check "auth-status refuses arguments" 1 "$RC"
+contains "auth-status refusal names the rule" "$OUT" "takes no arguments"
+
+OUT=$(AG_FAKE_AUTH_FAIL=1 "$AG" auth-status 2>&1); RC=$?
+check "auth-status passes gh's failure through" 1 "$RC"
+contains "auth-status shows gh's failure detail" "$OUT" "authentication failed"
 
 # -------------------------------------------------------------- preview
 new_repo

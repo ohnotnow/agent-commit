@@ -119,6 +119,22 @@ organisations:
 Only the authenticated login and organisation logins are printed. Profile
 fields such as names and email addresses are not exposed.
 
+### Check authentication
+
+```console
+$ agent-github auth-status
+github.com
+  ✓ Logged in to github.com account example-user (keyring)
+  - Active account: true
+  - Token: gho_************************************
+```
+
+`auth-status` passes through `gh auth status` so an agent that is denied raw
+`gh` can still tell an authentication problem from a GitHub outage, or spot
+that a broadly-scoped token is loaded before publishing anything. No arguments
+or flags are forwarded, so gh's `--show-token` cannot be reached and tokens
+stay masked. The exit code is gh's own: `0` healthy, `1` trouble.
+
 ### Preview and publish
 
 ```sh
@@ -170,7 +186,8 @@ and tells the user to inspect it before retrying.
 
 ### Exit codes
 
-- `0`: owners listed, preview shown, or repository published
+- `0`: owners listed, auth-status healthy, preview shown, or repository
+  published
 - `1`: refusal or operational error
 - `2`: token mismatch
 
