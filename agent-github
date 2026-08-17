@@ -1,0 +1,287 @@
+#!/bin/bash
+#
+# agent-github — publish the current local git repository to one new GitHub
+# repository without granting an agent general access to the gh CLI.
+#
+# Usage:
+#   agent-github owners
+#   agent-github publish --repo OWNER/NAME --public|--private \
+#       --description "Short description"
+#   agent-github publish --repo OWNER/NAME --public|--private \
+#       --description "Short description" --yes TOKEN
+#
+# Contract:
+#   * `owners` exposes only the authenticated GitHub login and organisation
+#     logins available to it. It is read-only.
+#   * `publish` creates one new repository and pushes the current branch.
+#     It cannot edit or delete repositories, push to an existing remote,
+#     publish tags, or pass arbitrary arguments through to gh.
+#   * The local repository must be clean, have at least one commit, be on a
+#     branch, and have no existing remotes.
+#   * The owner must be the authenticated user or one of their organisations.
+#   * A preview/confirm token is bound to the target, visibility, description,
+#     repository root, branch and HEAD commit.
+#
+# Exit codes: 0 success/preview; 1 refusal or operational error;
+#             2 confirmation token mismatch.
+#
+# Requirements: /bin/bash 3.2+, git 2.x, gh CLI authenticated with GitHub.
+
+PROG="agent-github"
+NL='
+'
+
+die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+agent-github — safely publish one new GitHub repository.
+
+  agent-github owners
+
+  agent-github publish --repo OWNER/NAME --public|--private \
+      --description "Short description"
+
+  agent-github publish --repo OWNER/NAME --public|--private \
+      --description "Short description" --yes TOKEN
+
+`owners` lists the authenticated account and available organisations.
+
+`publish` previews a single repository creation and initial push. Re-run the
+same command with the printed token to perform it. The source repository must
+be clean, have a branch and at least one commit, and have no existing remotes.
+
+There are deliberately no commands for editing or deleting repositories,
+changing visibility, force-pushing, publishing tags, or calling arbitrary
+GitHub APIs.
+EOF
+}
+
+need_gh() {
+    command -v gh >/dev/null 2>&1 || die 'gh CLI is required but was not found on PATH'
+}
+
+load_owners() {
+    need_gh
+    AUTH_OWNER=$(gh api user --jq '.login' 2>/dev/null) ||
+        die 'could not read the authenticated GitHub account; run gh auth status'
+    case "$AUTH_OWNER" in
+        ''|*"$NL"*) die 'gh returned an invalid authenticated account login' ;;
+    esac
+
+    ORG_OWNERS=$(gh api user/memberships/orgs --paginate --jq '.[].organization.login' 2>/dev/null) ||
+        die 'could not read GitHub organisation memberships'
+}
+
+print_owners() {
+    load_owners
+    printf 'authenticated account:\n    %s\n' "$AUTH_OWNER"
+    if [ -n "$ORG_OWNERS" ]; then
+        printf 'organisations:\n'
+        printf '%s\n' "$ORG_OWNERS" | while IFS= read -r org; do
+            [ -n "$org" ] && printf '    %s\n' "$org"
+        done
+    else
+        printf 'organisations:\n    (none)\n'
+    fi
+}
+
+owner_is_allowed() {
+    [ "$REPO_OWNER" = "$AUTH_OWNER" ] && return 0
+    while IFS= read -r org; do
+        [ -n "$org" ] && [ "$REPO_OWNER" = "$org" ] && return 0
+    done <<EOF
+$ORG_OWNERS
+EOF
+    return 1
+}
+
+publish() {
+    TARGET=""
+    VISIBILITY=""
+    DESCRIPTION=""
+    TOKEN_GIVEN=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo=*)
+                [ -z "$TARGET" ] || die '--repo may only be given once'
+                TARGET=${1#--repo=}
+                ;;
+            --repo)
+                shift
+                [ $# -gt 0 ] || die '--repo needs OWNER/NAME'
+                [ -z "$TARGET" ] || die '--repo may only be given once'
+                TARGET=$1
+                ;;
+            --public|--private)
+                [ -z "$VISIBILITY" ] || die 'choose exactly one of --public or --private'
+                VISIBILITY=${1#--}
+                ;;
+            -d|--description)
+                shift
+                [ $# -gt 0 ] || die "$1 needs a value"
+                [ -z "$DESCRIPTION" ] || die '--description may only be given once'
+                DESCRIPTION=$1
+                ;;
+            --description=*)
+                [ -z "$DESCRIPTION" ] || die '--description may only be given once'
+                DESCRIPTION=${1#--description=}
+                ;;
+            --yes=*)
+                [ -z "$TOKEN_GIVEN" ] || die '--yes may only be given once'
+                TOKEN_GIVEN=${1#--yes=}
+                ;;
+            --yes)
+                shift
+                [ $# -gt 0 ] || die '--yes needs the token printed by the preview'
+                [ -z "$TOKEN_GIVEN" ] || die '--yes may only be given once'
+                TOKEN_GIVEN=$1
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --)
+                die 'positional arguments are not accepted'
+                ;;
+            -*)
+                die "unknown option '$1'"
+                ;;
+            *)
+                die "unexpected argument '$1'"
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$TARGET" ] || die '--repo OWNER/NAME is required'
+    [ -n "$VISIBILITY" ] || die 'choose exactly one of --public or --private'
+    [ -n "$DESCRIPTION" ] || die '--description is required'
+
+    case "$TARGET" in
+        */*) ;;
+        *) die "invalid repository '$TARGET': expected OWNER/NAME" ;;
+    esac
+    REPO_OWNER=${TARGET%%/*}
+    REPO_NAME=${TARGET#*/}
+    case "$REPO_NAME" in
+        */*|'') die "invalid repository '$TARGET': expected exactly OWNER/NAME" ;;
+    esac
+    case "$REPO_NAME" in
+        .|..) die "invalid repository name '$REPO_NAME'" ;;
+    esac
+    if ! [[ "$REPO_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        die "invalid repository name '$REPO_NAME': use letters, numbers, '.', '_' or '-'"
+    fi
+    [ ${#REPO_NAME} -le 100 ] || die 'repository name must be 100 characters or fewer'
+    case "$DESCRIPTION" in
+        *"$NL"*) die 'description may not contain a newline' ;;
+    esac
+    [ ${#DESCRIPTION} -lt 100 ] || die 'description must be under 100 characters'
+
+    load_owners
+    owner_is_allowed ||
+        die "owner '$REPO_OWNER' is not the authenticated account or an available organisation"
+
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die 'not inside a git repository'
+    [ "$(git -C "$ROOT" rev-parse --is-bare-repository 2>/dev/null)" = "false" ] ||
+        die 'bare repositories cannot be published'
+    HEAD_OID=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null) ||
+        die 'the repository has no commits to publish'
+    BRANCH=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null) ||
+        die 'detached HEAD cannot be published; check out a branch first'
+
+    STATUS=$(git -C "$ROOT" status --porcelain --untracked-files=normal) ||
+        die 'could not inspect the working tree'
+    if [ -n "$STATUS" ]; then
+        printf '%s: working tree is not clean; commit or remove these changes before publishing:\n' "$PROG" >&2
+        printf '%s\n' "$STATUS" | head -20 >&2
+        exit 1
+    fi
+
+    REMOTES=$(git -C "$ROOT" remote)
+    if [ -n "$REMOTES" ]; then
+        die "repository already has a remote ('$REMOTES'); publish only works for a new remote repository"
+    fi
+
+    # This is a safe preflight, not the final authority: another actor could
+    # claim the name between preview and confirmation. gh repo create will
+    # still fail without altering an existing repository in that case.
+    if gh repo view "$TARGET" --json nameWithOwner --jq '.nameWithOwner' >/dev/null 2>&1; then
+        die "GitHub repository '$TARGET' already exists or is already accessible"
+    fi
+
+    COMMIT_COUNT=$(git -C "$ROOT" rev-list --count HEAD) || die 'could not count commits'
+    FILE_COUNT=$(git -C "$ROOT" ls-tree -r --name-only HEAD | wc -l | tr -d ' ')
+    SHORT_HEAD=$(git -C "$ROOT" rev-parse --short HEAD) || die 'could not abbreviate HEAD'
+
+    TOKEN=$({
+        printf 'action\0publish\0'
+        printf 'target\0%s\0' "$TARGET"
+        printf 'authenticated-owner\0%s\0' "$AUTH_OWNER"
+        printf 'visibility\0%s\0' "$VISIBILITY"
+        printf 'description\0%s\0' "$DESCRIPTION"
+        printf 'root\0%s\0' "$ROOT"
+        printf 'branch\0%s\0' "$BRANCH"
+        printf 'head\0%s\0' "$HEAD_OID"
+    } | git -C "$ROOT" hash-object --stdin | cut -c1-8)
+    [ -n "$TOKEN" ] || die 'failed to compute confirmation token'
+
+    if [ -n "$TOKEN_GIVEN" ]; then
+        if [ "$TOKEN_GIVEN" != "$TOKEN" ]; then
+            printf '%s: token mismatch — the target or local repository changed since the preview.\n' "$PROG" >&2
+            printf '%s: nothing published. Re-run without --yes for a fresh preview.\n' "$PROG" >&2
+            exit 2
+        fi
+
+        VISIBILITY_FLAG="--$VISIBILITY"
+        if ! gh repo create "$TARGET" "$VISIBILITY_FLAG" --description "$DESCRIPTION" \
+            --source "$ROOT" --remote origin --push; then
+            printf '%s: repository creation or initial push failed.\n' "$PROG" >&2
+            printf '%s: the GitHub repository may now exist; inspect it before retrying.\n' "$PROG" >&2
+            exit 1
+        fi
+        printf '\n%s: published %s at %s\n' "$PROG" "$SHORT_HEAD" "https://github.com/$TARGET"
+        exit 0
+    fi
+
+    printf '%s — preview only, nothing published yet\n\n' "$PROG"
+    printf 'authenticated account:\n    %s\n' "$AUTH_OWNER"
+    printf 'target:\n    %s\n' "https://github.com/$TARGET"
+    if [ "$VISIBILITY" = "public" ]; then
+        printf 'visibility:\n    PUBLIC — visible to everyone\n'
+    else
+        printf 'visibility:\n    private\n'
+    fi
+    printf 'description:\n    %s\n' "$DESCRIPTION"
+    printf 'source:\n    %s\n' "$ROOT"
+    printf 'branch and commit:\n    %s at %s\n' "$BRANCH" "$SHORT_HEAD"
+    printf 'history:\n    %s commit(s), %s tracked file(s)\n' "$COMMIT_COUNT" "$FILE_COUNT"
+    printf 'remote changes:\n'
+    printf '    create %s\n' "$TARGET"
+    printf '    add origin and push only %s\n' "$BRANCH"
+    printf '\nTo publish exactly this repository, re-run the same command with:  --yes %s\n' "$TOKEN"
+}
+
+case "${1:-}" in
+    owners)
+        shift
+        [ $# -eq 0 ] || die 'owners takes no arguments'
+        print_owners
+        ;;
+    publish)
+        shift
+        publish "$@"
+        ;;
+    -h|--help)
+        usage
+        ;;
+    '')
+        usage >&2
+        exit 1
+        ;;
+    *)
+        die "unknown command '$1'"
+        ;;
+esac

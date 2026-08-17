@@ -1,36 +1,42 @@
 # agent-commit
 
-A commit command for coding agents that makes the careful path the only path: explicit files, a Conventional Commits message, and a preview/confirm two-step that refuses to commit if anything changed in between.
+Two narrow commands for coding agents. `agent-commit` makes explicit local
+commits, while `agent-github` publishes a clean local repository to one new
+GitHub repository.
 
 ## Why
 
-Coding agents are enthusiastic committers. Left alone with `git`, they reach for `git add -A` and sweep up whatever happens to be lying around in the working tree: half-finished experiments, stray notes, that `.env` you'd rather they hadn't noticed. The usual fix is to deny `git add` and `git commit` outright, but then the agent can't commit at all and you end up doing it by hand.
+Coding agents are enthusiastic operators. Given unrestricted `git`, they tend
+to reach for `git add -A` and sweep up whatever happens to be lying around:
+half-finished experiments, stray notes, or that `.env` you would rather they
+had not noticed. These commands provide smaller routes instead:
 
-agent-commit is the middle path. You deny the raw git commands and allow this one instead. The agent gets to commit, but only by naming every file, writing a proper message, and reading back a preview of exactly what is about to happen.
+- `agent-commit` can commit only named files with a validated message.
+- `agent-github` can create and initially push only one new repository.
 
-## What it does
-
-A bare run commits nothing. It prints the plan: the full commit message, each named file and whether it's new, modified or deleted, and any dirty or untracked paths that are NOT part of the commit. It also prints a confirm token, which is a digest of the message plus each file's path and content. Re-running the same command with `--yes TOKEN` makes the commit, and only if nothing drifted since the preview. If a file changed, or the message changed, the token no longer matches and it refuses.
-
-Only the named files are committed, even if other paths happen to be staged. It never pushes, pulls, or touches anything else.
-
-## Requirements
-
-bash 3.2 or later and git 2.x. Nothing else, so it works on a stock macOS bash as well as Linux.
+They are guardrails for the ordinary path, not a complete sandbox against an
+agent deliberately reaching for another network-capable tool.
 
 ## Installation
+
+Both commands require Bash 3.2 or later and Git 2.x. `agent-github` also
+requires the [GitHub CLI](https://cli.github.com/) to be installed and
+authenticated.
 
 ```sh
 git clone https://github.com/ohnotnow/agent-commit.git
 cd agent-commit
-cp agent-commit /usr/local/bin/   # or anywhere on your PATH
+cp agent-commit agent-github /usr/local/bin/   # or anywhere on your PATH
 ```
 
-## Usage
+## agent-commit
 
-Preview first:
+`agent-commit` stages and commits an explicit list of files with a Conventional
+Commits message. Other staged, dirty, or untracked paths are left alone.
 
-```
+### Preview and confirm
+
+```console
 $ agent-commit -m "fix(parser): handle empty input" src/parser.sh
 agent-commit — preview only, nothing committed yet
 
@@ -44,69 +50,170 @@ left untouched (1 dirty/untracked paths, NOT part of this commit):
 To make exactly this commit, run the same command again with:  --yes 4dd7f736
 ```
 
-Then confirm:
+Then repeat the command with the token:
 
-```
-$ agent-commit -m "fix(parser): handle empty input" --yes 4dd7f736 src/parser.sh
+```sh
+agent-commit -m "fix(parser): handle empty input" --yes 4dd7f736 src/parser.sh
 ```
 
-Multi-line messages work as you'd expect, and the preview shows the whole message, body and all.
+The token digests the message, each named path, and its content. If a named file
+or the message changes after the preview, confirmation is refused.
 
 ### Messages from a file
 
-Inline `-m` gets fiddly as soon as the message outgrows one line: quoting, backticks, `$variables` the shell wants to expand. Borrowing curl's convention, `-m @path` reads the message from a file instead:
+Inline `-m` becomes fiddly when a message contains multiple lines, backticks,
+or shell variables. Borrowing curl's convention, `-m @path` reads the message
+from a file:
 
+```sh
+agent-commit -m @/tmp/scratch/commit.txt src/parser.sh
 ```
-$ agent-commit -m @/tmp/scratch/commit.txt src/parser.sh
-```
 
-The confirm token digests the message text itself, so editing the file between preview and confirm counts as drift and is refused, the same as any other change. There's no ambiguity with literal messages: a valid message can never start with `@`, because its first line has to start with a Conventional Commits type.
+The token binds the message text itself, so editing the message file between
+preview and confirmation counts as drift.
 
-### The rules
+### Commit rules
 
-- Explicit files only. Directories, `.`, `-a`, `-A` and `--all` are refused. Name each file.
-- The first line of the message must follow the Conventional Commits spec: `type(optional-scope): summary`, where type is one of feat, fix, docs, style, refactor, perf, test, build, ci, chore or revert.
-- No AI attribution. A message containing `authored-by`, `anthropic`, `claude.ai`, `claude.com`, `claude code` or `generated with` (case-insensitive, anywhere in the message) is refused. Agents are told by their system prompts to append these as footers; this tool exists so they can't. A bare mention of `claude` on its own is allowed.
-- Renames must be committed whole. If git has a rename staged, both the old and the new path must be named, otherwise it refuses. Naming one side would silently leave the old path alive in HEAD.
+- Every file must be named. Directories, `.`, `-a`, `-A`, and `--all` are
+  refused.
+- The first message line must use `type(optional-scope): summary`, where the
+  type is `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`,
+  `ci`, `chore`, or `revert`.
+- AI-attribution shapes such as `authored-by`, `anthropic`, `claude.ai`,
+  `claude.com`, `claude code`, and `generated with` are refused anywhere in the
+  message. A bare mention of `claude` is allowed.
+- A staged rename must include both the old and new path.
 - Paths may not be absolute, contain `..`, start with `-`, or contain a newline.
-- A named file with no changes is refused rather than quietly skipped.
+- A named file with no changes is refused instead of being silently skipped.
+
+### SAFETY_MODE
+
+`SAFETY_MODE` is an in-file constant near the top of `agent-commit`. Setting it
+to `off` skips the preview/token step and commits immediately. It is not an
+environment variable or command-line option, so changing it is a deliberate
+human edit rather than something an agent can add to an invocation.
 
 ### Exit codes
 
-- `0` preview shown or commit made
-- `1` refusal or usage error
-- `2` token mismatch, meaning something drifted since the preview or the token is wrong
+- `0`: preview shown or commit made
+- `1`: refusal or usage error
+- `2`: token mismatch
 
-## Using it with a coding agent
+## agent-github
 
-With Claude Code, deny the raw git write commands and allow this instead:
+`agent-github` exposes only the GitHub capabilities needed to publish a local
+project for the first time. It cannot edit or delete repositories, change an
+existing repository's visibility, push tags, force-push, manage other GitHub
+resources, or pass arbitrary arguments through to `gh`.
+
+### List allowed owners
+
+```console
+$ agent-github owners
+authenticated account:
+    example-user
+organisations:
+    example-org
+```
+
+Only the authenticated login and organisation logins are printed. Profile
+fields such as names and email addresses are not exposed.
+
+### Preview and publish
+
+```sh
+agent-github publish \
+  --repo example-user/example-project \
+  --public \
+  --description "A short description of the project"
+```
+
+The command prints a preview containing:
+
+- The authenticated account and exact `OWNER/REPOSITORY` target.
+- Public or private visibility, with public visibility made prominent.
+- The description, repository root, current branch, and HEAD commit.
+- The number of commits and tracked files that will be published.
+- The proposed creation of `origin` and push of the current branch.
+
+It then prints an eight-character token. Repeat the identical command with that
+token to publish:
+
+```sh
+agent-github publish \
+  --repo example-user/example-project \
+  --public \
+  --description "A short description of the project" \
+  --yes 89abcdef
+```
+
+The token is bound to the authenticated account, target, visibility,
+description, repository root, branch, and HEAD commit.
+
+### Publication rules
+
+- The local repository must have at least one commit and be on a branch.
+- The working tree must be completely clean, including untracked files.
+- No Git remotes may already exist.
+- The owner must be the authenticated account or one of its organisations.
+- The target repository must not already exist or be accessible.
+- Visibility must be explicitly `--public` or `--private`.
+- Descriptions are required, single-line, and under 100 characters.
+
+Confirmation is always mandatory. Unlike `agent-commit`, `agent-github` has no
+`SAFETY_MODE` bypass because publishing, particularly to a public repository,
+can expose history outside the local machine.
+
+A network or Git failure can happen after repository creation but before the
+push. The command then warns that the GitHub repository may have been created
+and tells the user to inspect it before retrying.
+
+### Exit codes
+
+- `0`: owners listed, preview shown, or repository published
+- `1`: refusal or operational error
+- `2`: token mismatch
+
+## Using the commands with a coding agent
+
+Allow the two constrained commands and deny the broader write interfaces. For
+example, with Claude Code:
 
 ```json
 {
   "permissions": {
-    "allow": ["Bash(agent-commit *)"],
-    "deny": ["Bash(git add *)", "Bash(git commit *)", "Bash(git push *)"]
+    "allow": [
+      "Bash(agent-commit *)",
+      "Bash(agent-github *)"
+    ],
+    "deny": [
+      "Bash(gh *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
   }
 }
 ```
-
-The two-step is deliberate friction. The agent has to run the preview, see the plan, and repeat the command with the token, so "commit everything and hope" stops being an available move.
-
-## SAFETY_MODE
-
-There's a `SAFETY_MODE` constant at the top of the script. Setting it to `off` skips the preview/token two-step so a bare run commits immediately. It's an in-file constant rather than an environment variable or flag on purpose: switching it off should be a loud, human act, not something an agent can flip inline on the command it runs.
 
 ## Running the tests
 
 ```sh
 bash ac-test.sh
+bash ag-test.sh
 ```
 
-The suite builds a throwaway git repo under `mktemp` and removes it on exit; it never touches the repository you run it from. It covers previews, refusals, drift detection, renames, multi-line messages and SAFETY_MODE.
+ShellCheck:
+
+```sh
+shellcheck -s bash agent-github ag-test.sh
+```
 
 ## Contributing
 
-It's a single bash script, so the barrier is low: fork, clone, make your change, and run `bash ac-test.sh` before opening a pull request. If you're fixing a bug, a failing test case that proves it is worth more than the fix itself.
+Fork or clone the repository, make the smallest useful change, and run both
+suites before opening a pull request. For bug fixes, a failing test that
+demonstrates the problem is particularly welcome.
 
 ## Licence
 
