@@ -42,6 +42,33 @@ case "${1:-} ${2:-}" in
         printf '%s\n' 'test-org' 'another-org'
         exit 0
         ;;
+    'api -X')
+        # enable-vuln-reporting: gh api -X PUT repos/OWNER/NAME/private-vulnerability-reporting
+        printf '%s\n' "$*" >> "$AG_FAKE_LOG"
+        if [ "$3" != "PUT" ]; then
+            printf 'unexpected fake gh api method: %s\n' "$*" >&2
+            exit 90
+        fi
+        case "$4" in
+            repos/*/private-vulnerability-reporting) ;;
+            *) printf 'unexpected fake gh api path: %s\n' "$*" >&2; exit 90 ;;
+        esac
+        if [ "${AG_FAKE_VULN_FAIL:-0}" = "1" ]; then
+            printf 'HTTP 422: Privately reporting security vulnerabilities is not supported for private repositories\n' >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+    'api repos/'*)
+        # check-remote existence probe: gh api repos/OWNER/NAME --jq .full_name
+        target=${2#repos/}
+        if [ "${AG_FAKE_REPO_GONE:-0}" = "1" ]; then
+            printf 'HTTP 404: Not Found (https://api.github.com/repos/%s)\n' "$target" >&2
+            exit 1
+        fi
+        printf '%s\n' "$target"
+        exit 0
+        ;;
     'repo view')
         if [ "${AG_FAKE_EXISTING:-0}" = "1" ]; then
             printf '%s\n' "$3"
@@ -276,6 +303,65 @@ OUT=$(cd "$REPO" && AG_FAKE_CREATE_FAIL=1 "$AG" publish --repo test-user/safe-pr
     --description 'A carefully published test project' --yes "$FAIL_TOKEN" 2>&1); RC=$?
 check "reports create/push failure" 1 "$RC"
 contains "failure warns about partial creation" "$OUT" "may now exist"
+
+# ---------------------------------------------------------- check-remote
+new_repo
+OUT=$(cd "$REPO" && "$AG" check-remote 2>&1); RC=$?
+check "check-remote passes a repo with no remotes" 0 "$RC"
+contains "check-remote says publish can proceed" "$OUT" "no remotes"
+
+OUT=$(cd "$REPO" && "$AG" check-remote extra 2>&1); RC=$?
+check "check-remote refuses arguments" 1 "$RC"
+contains "check-remote refusal names the rule" "$OUT" "takes no arguments"
+
+git -C "$REPO" remote add origin https://github.com/test-user/live-project.git
+OUT=$(cd "$REPO" && "$AG" check-remote 2>&1); RC=$?
+check "check-remote flags an existing remote" 1 "$RC"
+contains "check-remote lists the remote URL" "$OUT" "origin  https://github.com/test-user/live-project.git"
+contains "check-remote reports a live repository" "$OUT" "github repository test-user/live-project: exists"
+
+OUT=$(cd "$REPO" && AG_FAKE_REPO_GONE=1 "$AG" check-remote 2>&1); RC=$?
+check "check-remote flags a dangling remote" 1 "$RC"
+contains "check-remote reports the 404" "$OUT" "HTTP 404"
+contains "check-remote prints the fix command" "$OUT" "git remote remove origin"
+
+git -C "$REPO" remote set-url origin git@github.com:test-user/ssh-project.git
+OUT=$(cd "$REPO" && "$AG" check-remote 2>&1); RC=$?
+check "check-remote handles ssh URLs" 1 "$RC"
+contains "check-remote parses the ssh target" "$OUT" "github repository test-user/ssh-project: exists"
+
+git -C "$REPO" remote set-url origin ssh://internal.example.com/team/thing.git
+OUT=$(cd "$REPO" && "$AG" check-remote 2>&1); RC=$?
+check "check-remote flags a non-github remote" 1 "$RC"
+contains "check-remote explains the unchecked remote" "$OUT" "cannot check remotely"
+
+# ------------------------------------------------ enable-vuln-reporting
+: > "$AG_FAKE_LOG"
+OUT=$("$AG" enable-vuln-reporting --repo test-user/safe-project 2>&1); RC=$?
+check "enable-vuln-reporting succeeds for own repo" 0 "$RC"
+contains "enable-vuln-reporting confirms" "$OUT" "private vulnerability reporting enabled for test-user/safe-project"
+contains "gh receives the exact PUT" "$(cat "$AG_FAKE_LOG")" "api -X PUT repos/test-user/safe-project/private-vulnerability-reporting"
+not_contains "enable-vuln-reporting has no token step" "$OUT" "--yes"
+
+OUT=$("$AG" enable-vuln-reporting --repo test-org/safe-project 2>&1); RC=$?
+check "enable-vuln-reporting allows organisation repos" 0 "$RC"
+
+OUT=$("$AG" enable-vuln-reporting --repo stranger/project 2>&1); RC=$?
+check "enable-vuln-reporting refuses unknown owner" 1 "$RC"
+contains "vuln owner refusal explains allowed scope" "$OUT" "authenticated account or an available organisation"
+
+OUT=$("$AG" enable-vuln-reporting --repo 'test-user/bad name' 2>&1); RC=$?
+check "enable-vuln-reporting refuses invalid name" 1 "$RC"
+
+OUT=$("$AG" enable-vuln-reporting 2>&1); RC=$?
+check "enable-vuln-reporting requires --repo" 1 "$RC"
+
+OUT=$("$AG" enable-vuln-reporting --repo test-user/safe-project extra 2>&1); RC=$?
+check "enable-vuln-reporting refuses extra arguments" 1 "$RC"
+
+OUT=$(AG_FAKE_VULN_FAIL=1 "$AG" enable-vuln-reporting --repo test-user/private-repo 2>&1); RC=$?
+check "enable-vuln-reporting surfaces gh failure" 1 "$RC"
+contains "gh's real 422 is shown" "$OUT" "HTTP 422"
 
 echo
 if [ $FAILS -eq 0 ]; then

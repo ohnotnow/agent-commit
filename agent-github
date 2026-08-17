@@ -6,6 +6,8 @@
 # Usage:
 #   agent-github owners
 #   agent-github auth-status
+#   agent-github check-remote
+#   agent-github enable-vuln-reporting --repo OWNER/NAME
 #   agent-github publish --repo OWNER/NAME --public|--private \
 #       --description "Short description"
 #   agent-github publish --repo OWNER/NAME --public|--private \
@@ -18,6 +20,16 @@
 #     gh can still tell an authentication problem from a GitHub outage. It
 #     takes no arguments and forwards no flags, so gh's --show-token can
 #     never be reached through it; tokens stay masked.
+#   * `check-remote` is a read-only diagnosis of the local git remotes:
+#     each remote is listed and github.com ones are checked for existence.
+#     It never removes anything; a stale remote is reported together with
+#     the `git remote remove` command a human can run. (A 404 cannot
+#     distinguish a deleted repository from lost access, so removal stays
+#     a human decision.)
+#   * `enable-vuln-reporting` enables GitHub private vulnerability
+#     reporting on one named repository owned by the authenticated user or
+#     one of their organisations. The PUT is idempotent and needs no
+#     confirm token: it turns on a protection and exposes nothing.
 #   * `publish` creates one new repository and pushes the current branch.
 #     It cannot edit or delete repositories, push to an existing remote,
 #     publish tags, or pass arbitrary arguments through to gh.
@@ -28,7 +40,8 @@
 #     repository root, branch and HEAD commit.
 #
 # Exit codes: 0 success/preview; 1 refusal or operational error;
-#             2 confirmation token mismatch.
+#             2 confirmation token mismatch (publish only).
+#             check-remote: 0 no remotes; 1 remotes exist or check failed.
 #
 # Requirements: /bin/bash 3.2+, git 2.x, gh CLI authenticated with GitHub.
 
@@ -46,6 +59,10 @@ agent-github — safely publish one new GitHub repository.
 
   agent-github auth-status
 
+  agent-github check-remote
+
+  agent-github enable-vuln-reporting --repo OWNER/NAME
+
   agent-github publish --repo OWNER/NAME --public|--private \
       --description "Short description"
 
@@ -56,11 +73,19 @@ agent-github — safely publish one new GitHub repository.
 
 `auth-status` shows the gh CLI's authentication state, with tokens masked.
 
+`check-remote` lists local git remotes and checks whether github.com ones
+still exist; it never removes anything. Exit 0 means no remotes (publish
+can proceed); exit 1 means remotes exist or the check failed.
+
+`enable-vuln-reporting` enables GitHub private vulnerability reporting on
+one repository owned by you or one of your organisations. It is idempotent,
+and GitHub only supports it on public repositories.
+
 `publish` previews a single repository creation and initial push. Re-run the
 same command with the printed token to perform it. The source repository must
 be clean, have a branch and at least one commit, and have no existing remotes.
 
-There are deliberately no commands for editing or deleting repositories,
+There are deliberately no commands for deleting repositories or remotes,
 changing visibility, force-pushing, publishing tags, or calling arbitrary
 GitHub APIs.
 EOF
@@ -118,6 +143,121 @@ owner_is_allowed() {
 $ORG_OWNERS
 EOF
     return 1
+}
+
+# Validate an OWNER/NAME target and split it into REPO_OWNER and REPO_NAME.
+parse_target() {
+    case "$1" in
+        */*) ;;
+        *) die "invalid repository '$1': expected OWNER/NAME" ;;
+    esac
+    REPO_OWNER=${1%%/*}
+    REPO_NAME=${1#*/}
+    case "$REPO_NAME" in
+        */*|'') die "invalid repository '$1': expected exactly OWNER/NAME" ;;
+    esac
+    case "$REPO_NAME" in
+        .|..) die "invalid repository name '$REPO_NAME'" ;;
+    esac
+    if ! [[ "$REPO_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        die "invalid repository name '$REPO_NAME': use letters, numbers, '.', '_' or '-'"
+    fi
+    [ ${#REPO_NAME} -le 100 ] || die 'repository name must be 100 characters or fewer'
+}
+
+check_remote() {
+    git rev-parse --show-toplevel >/dev/null 2>&1 || die 'not inside a git repository'
+    REMOTE_NAMES=$(git remote) || die 'could not list git remotes'
+    if [ -z "$REMOTE_NAMES" ]; then
+        printf '%s: no remotes configured, publish can proceed\n' "$PROG"
+        exit 0
+    fi
+
+    REMOTE_COUNT=$(printf '%s\n' "$REMOTE_NAMES" | grep -c .)
+    printf '%s: %s remote(s) found; publish refuses while any remote exists\n\n' "$PROG" "$REMOTE_COUNT"
+
+    while IFS= read -r rname; do
+        [ -n "$rname" ] || continue
+        url=$(git remote get-url "$rname" 2>/dev/null) || url='(could not read URL)'
+        printf '    %s  %s\n' "$rname" "$url"
+
+        target=""
+        case "$url" in
+            https://github.com/*/*)   target=${url#https://github.com/} ;;
+            http://github.com/*/*)    target=${url#http://github.com/} ;;
+            git@github.com:*/*)       target=${url#git@github.com:} ;;
+            ssh://git@github.com/*/*) target=${url#ssh://git@github.com/} ;;
+            git://github.com/*/*)     target=${url#git://github.com/} ;;
+        esac
+        target=${target%/}
+        target=${target%.git}
+        if ! [[ "$target" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            printf '        not a recognisable github.com URL; cannot check remotely (publish still refuses while it exists)\n'
+            continue
+        fi
+
+        need_gh
+        # </dev/null keeps gh away from the loop's stdin (the remote list).
+        if gh_read api "repos/$target" --jq '.full_name' </dev/null; then
+            printf '        github repository %s: exists\n' "$target"
+        else
+            case "$GH_ERR" in
+                *'HTTP 404'*)
+                    printf '        github repository %s: HTTP 404, repository gone or inaccessible\n' "$target"
+                    printf '        fix: git remote remove %s\n' "$rname"
+                    ;;
+                *)
+                    printf '        github repository %s: could not check%s\n' "$target" "${GH_ERR:+: $GH_ERR}"
+                    ;;
+            esac
+        fi
+    done <<EOF
+$REMOTE_NAMES
+EOF
+
+    exit 1
+}
+
+enable_vuln_reporting() {
+    TARGET=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo=*)
+                [ -z "$TARGET" ] || die '--repo may only be given once'
+                TARGET=${1#--repo=}
+                ;;
+            --repo)
+                shift
+                [ $# -gt 0 ] || die '--repo needs OWNER/NAME'
+                [ -z "$TARGET" ] || die '--repo may only be given once'
+                TARGET=$1
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                die "unknown option '$1'"
+                ;;
+            *)
+                die "unexpected argument '$1'"
+                ;;
+        esac
+        shift
+    done
+    [ -n "$TARGET" ] || die '--repo OWNER/NAME is required'
+    parse_target "$TARGET"
+
+    load_owners
+    owner_is_allowed ||
+        die "owner '$REPO_OWNER' is not the authenticated account or an available organisation"
+
+    # The PUT is idempotent: enabling an already-enabled repository
+    # succeeds. GitHub only supports the feature on public repositories;
+    # visibility is not pre-checked so a refusal shows GitHub's own error.
+    gh_read api -X PUT "repos/$TARGET/private-vulnerability-reporting" ||
+        die "could not enable private vulnerability reporting for '$TARGET'${GH_ERR:+: $GH_ERR}"
+    printf '%s: private vulnerability reporting enabled for %s\n' "$PROG" "$TARGET"
 }
 
 publish() {
@@ -183,22 +323,7 @@ publish() {
     [ -n "$VISIBILITY" ] || die 'choose exactly one of --public or --private'
     [ -n "$DESCRIPTION" ] || die '--description is required'
 
-    case "$TARGET" in
-        */*) ;;
-        *) die "invalid repository '$TARGET': expected OWNER/NAME" ;;
-    esac
-    REPO_OWNER=${TARGET%%/*}
-    REPO_NAME=${TARGET#*/}
-    case "$REPO_NAME" in
-        */*|'') die "invalid repository '$TARGET': expected exactly OWNER/NAME" ;;
-    esac
-    case "$REPO_NAME" in
-        .|..) die "invalid repository name '$REPO_NAME'" ;;
-    esac
-    if ! [[ "$REPO_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        die "invalid repository name '$REPO_NAME': use letters, numbers, '.', '_' or '-'"
-    fi
-    [ ${#REPO_NAME} -le 100 ] || die 'repository name must be 100 characters or fewer'
+    parse_target "$TARGET"
     case "$DESCRIPTION" in
         *"$NL"*) die 'description may not contain a newline' ;;
     esac
@@ -302,6 +427,15 @@ case "${1:-}" in
         # token stays masked. gh's own exit code (1 on auth trouble) is the
         # exit code of this command.
         gh auth status
+        ;;
+    check-remote)
+        shift
+        [ $# -eq 0 ] || die 'check-remote takes no arguments'
+        check_remote
+        ;;
+    enable-vuln-reporting)
+        shift
+        enable_vuln_reporting "$@"
         ;;
     publish)
         shift

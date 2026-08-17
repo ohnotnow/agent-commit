@@ -102,8 +102,10 @@ human edit rather than something an agent can add to an invocation.
 ## agent-github
 
 `agent-github` exposes only the GitHub capabilities needed to publish a local
-project for the first time. It cannot edit or delete repositories, change an
-existing repository's visibility, push tags, force-push, manage other GitHub
+project for the first time. Its writes are creating and pushing one new
+repository, and enabling private vulnerability reporting on a repository you
+own. It cannot delete repositories or remotes, change an existing
+repository's visibility, push tags, force-push, manage other GitHub
 resources, or pass arbitrary arguments through to `gh`.
 
 ### List allowed owners
@@ -134,6 +136,39 @@ github.com
 that a broadly-scoped token is loaded before publishing anything. No arguments
 or flags are forwarded, so gh's `--show-token` cannot be reached and tokens
 stay masked. The exit code is gh's own: `0` healthy, `1` trouble.
+
+### Check remotes
+
+```console
+$ agent-github check-remote
+agent-github: 1 remote(s) found; publish refuses while any remote exists
+
+    origin  https://github.com/example-user/old-project.git
+        github repository example-user/old-project: HTTP 404, repository gone or inaccessible
+        fix: git remote remove origin
+```
+
+`check-remote` lists every local remote and, for github.com URLs, asks GitHub
+whether the repository still exists. A dangling remote (for example after a
+published repository was later deleted on GitHub) is reported with the exact
+`git remote remove` command to run. Removal stays a human action: a 404
+cannot distinguish a deleted repository from lost access, so the command
+diagnoses and removes nothing. Non-github remotes are listed but cannot be
+checked. Exit codes: `0` no remotes (publish can proceed), `1` remotes exist
+or the check failed.
+
+### Enable private vulnerability reporting
+
+```sh
+agent-github enable-vuln-reporting --repo example-user/example-project
+```
+
+Enables GitHub's [private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/working-with-repository-security-advisories/configuring-private-vulnerability-reporting-for-a-repository)
+on one repository owned by the authenticated account or one of its
+organisations. The underlying call is idempotent, so enabling an
+already-enabled repository succeeds. There is no preview/token step: the call
+turns on a protection and exposes nothing. GitHub only supports the feature
+on public repositories; on a private one, GitHub's own error is shown.
 
 ### Preview and publish
 
@@ -186,10 +221,13 @@ and tells the user to inspect it before retrying.
 
 ### Exit codes
 
-- `0`: owners listed, auth-status healthy, preview shown, or repository
-  published
+- `0`: owners listed, auth-status healthy, preview shown, repository
+  published, or vulnerability reporting enabled
 - `1`: refusal or operational error
-- `2`: token mismatch
+- `2`: token mismatch (publish only)
+
+`check-remote` reports state through its exit code instead: `0` no remotes
+exist, `1` remotes exist or the check failed.
 
 ## Using the commands with a coding agent
 
