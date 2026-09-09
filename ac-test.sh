@@ -276,6 +276,30 @@ contains "SAFETY_MODE=off announces itself" "$OUT" "SAFETY_MODE is off"
 NEWSUBJ=$(git log -1 --format=%s)
 [ "$NEWSUBJ" = "fix: safety off commits straight away" ] && pass "safety-off commit landed" || fail "safety-off commit missing"
 
+# --------------------------------------------------------- --trusted-model
+# Hidden from --help on purpose: a human mentions it in-session only when
+# the model has earned it. It prints the full preview block (so the
+# transcript still shows what went in and what was left alone), then
+# commits without the token round trip. --yes still wins over it.
+OUT=$("$AC" --help 2>&1)
+not_contains "--help does not advertise --trusted-model" "$OUT" "trusted-model"
+
+printf 'trusted\n' > a.txt
+OUT=$("$AC" -m 'fix: trusted model commits straight away' --trusted-model a.txt 2>&1); RC=$?
+check        "--trusted-model commits immediately" 0 "$RC"
+contains     "--trusted-model announces itself" "$OUT" "--trusted-model given"
+contains     "--trusted-model still prints the plan" "$OUT" "modified  a.txt"
+contains     "--trusted-model still lists leftovers" "$OUT" "stray.tmp"
+not_contains "--trusted-model prints no token" "$OUT" "--yes"
+NEWSUBJ=$(git log -1 --format=%s)
+[ "$NEWSUBJ" = "fix: trusted model commits straight away" ] && pass "trusted-model commit landed" || fail "trusted-model commit missing"
+
+printf 'trusted again\n' > a.txt
+BEFORE=$(git rev-parse HEAD)
+OUT=$("$AC" -m 'fix: x' --trusted-model --yes deadbeef a.txt 2>&1); RC=$?
+check "--trusted-model with a wrong --yes still refused" 2 "$RC"
+[ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "trusted + wrong token: no commit" || fail "trusted + wrong token: COMMITTED"
+
 # ------------------------------------------------------------------ result
 echo
 if [ $FAILS -eq 0 ]; then
