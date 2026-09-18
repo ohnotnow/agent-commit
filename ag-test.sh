@@ -102,8 +102,13 @@ case "${1:-} ${2:-}" in
         if [ "${AG_FAKE_CREATE_FAIL:-0}" = "1" ]; then
             exit 1
         fi
-        git -C "$source_dir" remote add "$remote_name" "https://github.com/$target.git"
+        # Real gh prints the URL after creating the repository and only
+        # then pushes, so the fake writes, then does its "push" work,
+        # then writes again. If stdout is a closed pipe the second write
+        # dies of SIGPIPE, exactly as gh would.
         printf 'https://github.com/%s\n' "$target"
+        git -C "$source_dir" remote add "$remote_name" "https://github.com/$target.git"
+        printf 'Pushed commits to https://github.com/%s\n' "$target"
         exit 0
         ;;
 esac
@@ -294,6 +299,19 @@ check "enforces short description" 1 "$RC"
 
 OUT=$(cd "$REPO" && "$AG" publish --repo test-user/project --public --description 'Safe description' --delete 2>&1); RC=$?
 check "refuses arbitrary gh-like options" 1 "$RC"
+
+# ------------------------------------------------------- closed pipe
+# The confirmed publish must complete even when stdout's reader has gone
+# (agent-github publish ... --yes TOKEN | head -1). gh's own output is
+# captured so a SIGPIPE can only ever truncate our report afterwards.
+new_repo
+run_publish
+PIPE_TOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
+OUT=$(cd "$REPO" && "$AG" publish --repo test-user/safe-project --public \
+    --description 'A carefully published test project' --yes "$PIPE_TOKEN" 2>&1 | head -1)
+contains "publish | head -1 prints gh's first line" "$OUT" "https://github.com/test-user/safe-project"
+if [ "$(git -C "$REPO" remote)" = "origin" ]; then pass "publish | head -1: push side completed"; else fail "publish | head -1: remote missing"; fi
+contains "publish | head -1: gh got its full run" "$(cat "$AG_FAKE_LOG")" "test-user/safe-project <--public>"
 
 # ------------------------------------------------------ partial failure
 new_repo

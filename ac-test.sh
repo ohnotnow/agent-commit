@@ -300,6 +300,27 @@ OUT=$("$AC" -m 'fix: x' --trusted-model --yes deadbeef a.txt 2>&1); RC=$?
 check "--trusted-model with a wrong --yes still refused" 2 "$RC"
 [ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "trusted + wrong token: no commit" || fail "trusted + wrong token: COMMITTED"
 
+# ------------------------------------------------------------- closed pipe
+# Reported by an agent in September 2026: 'agent-commit --trusted-model
+# ... | head' printed "committing immediately", was SIGPIPE'd part way
+# through the plan once head had its lines, and exited without
+# committing. The commit must land even when nobody is reading stdout.
+# The exit status is deliberately not checked: the reporting printf
+# after the commit may still die of SIGPIPE, and that is fine.
+printf 'piped trusted\n' > a.txt
+OUT=$("$AC" -m 'fix: trusted model survives a closed pipe' --trusted-model a.txt 2>/dev/null | head -1)
+contains "trusted-model | head -1 still announces" "$OUT" "committing immediately"
+NEWSUBJ=$(git log -1 --format=%s)
+[ "$NEWSUBJ" = "fix: trusted model survives a closed pipe" ] && pass "trusted-model | head -1: commit landed" || fail "trusted-model | head -1: commit missing"
+
+printf 'piped yes\n' > a.txt
+OUT=$("$AC" -m 'fix: confirmed commit survives a closed pipe' a.txt 2>&1)
+TOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
+OUT=$("$AC" -m 'fix: confirmed commit survives a closed pipe' --yes "$TOKEN" a.txt 2>&1 | head -1)
+not_contains "--yes | head -1 does not claim git failed" "$OUT" "git commit failed"
+NEWSUBJ=$(git log -1 --format=%s)
+[ "$NEWSUBJ" = "fix: confirmed commit survives a closed pipe" ] && pass "--yes | head -1: commit landed" || fail "--yes | head -1: commit missing"
+
 # ------------------------------------------------------------------ result
 echo
 if [ $FAILS -eq 0 ]; then

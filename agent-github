@@ -385,12 +385,18 @@ publish() {
         fi
 
         VISIBILITY_FLAG="--$VISIBILITY"
-        if ! gh repo create "$TARGET" "$VISIBILITY_FLAG" --description "$DESCRIPTION" \
-            --source "$ROOT" --remote origin --push; then
+        # gh's stdout is captured rather than written straight to our
+        # stdout. gh prints the new repository URL after creating it and
+        # only then pushes; if our stdout is a pipe whose reader has gone
+        # (agent-github ... | head -1), a direct write would SIGPIPE gh
+        # between the two and leave a created-but-empty repository.
+        if ! CREATE_OUT=$(gh repo create "$TARGET" "$VISIBILITY_FLAG" --description "$DESCRIPTION" \
+            --source "$ROOT" --remote origin --push); then
             printf '%s: repository creation or initial push failed.\n' "$PROG" >&2
             printf '%s: the GitHub repository may now exist; inspect it before retrying.\n' "$PROG" >&2
             exit 1
         fi
+        printf '%s\n' "$CREATE_OUT"
         printf '\n%s: published %s at %s\n' "$PROG" "$SHORT_HEAD" "https://github.com/$TARGET"
         exit 0
     fi

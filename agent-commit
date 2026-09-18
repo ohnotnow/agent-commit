@@ -295,7 +295,7 @@ print_plan() {
 
 # ------------------------------------------------------------------- commit
 
-do_commit() {
+perform_commit() {
     # Only paths present on disk are added (needed for untracked files;
     # harmless for tracked ones). Deleted paths — including the old side
     # of a rename, which matches no pathspec for 'git add' — are recorded
@@ -309,18 +309,37 @@ do_commit() {
     if [ ${#ADD_LIST[@]} -gt 0 ]; then
         git add -- "${ADD_LIST[@]}" || die 'git add failed'
     fi
-    git commit -m "$MSG" -- "${FILES[@]}" || die 'git commit failed'
-    short=$(git rev-parse --short HEAD)
-    printf '\n%s: committed %d file(s) as %s\n' "$PROG" "${#FILES[@]}" "$short"
+    # git's summary is captured rather than written straight to stdout.
+    # If stdout is a pipe whose reader has gone (agent-commit ... | head),
+    # a direct write would SIGPIPE git after the commit was already made
+    # and this would then wrongly report 'git commit failed'.
+    COMMIT_OUT=$(git commit -m "$MSG" -- "${FILES[@]}") || die 'git commit failed'
+    COMMIT_SHORT=$(git rev-parse --short HEAD)
+}
+
+report_commit() {
+    printf '%s\n' "$COMMIT_OUT"
+    printf '\n%s: committed %d file(s) as %s\n' "$PROG" "${#FILES[@]}" "$COMMIT_SHORT"
     if [ $LEFTOVER_COUNT -gt 0 ]; then
         printf '%s: %d dirty/untracked path(s) left untouched\n' "$PROG" "$LEFTOVER_COUNT"
     fi
 }
 
-commit_now() { # commit_now <why> : announce, show the plan, commit
+do_commit() {
+    perform_commit
+    report_commit
+}
+
+commit_now() { # commit_now <why> : commit, then announce and show the plan
+    # The commit happens BEFORE anything is written to stdout. Nobody is
+    # reading the plan to approve it on this path, and writing first is
+    # what let 'agent-commit --trusted-model ... | head' print the
+    # announcement, get SIGPIPE'd part way through the plan once head had
+    # its lines, and exit without ever committing.
+    perform_commit
     printf '%s: %s - committing immediately.\n\n' "$PROG" "$1"
     print_plan
-    do_commit
+    report_commit
 }
 
 if [ -n "$TOKEN_GIVEN" ]; then
