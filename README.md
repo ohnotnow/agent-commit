@@ -84,14 +84,46 @@ preview and confirmation counts as drift.
   message. A bare mention of `claude` is allowed.
 - A staged rename must include both the old and new path.
 - Paths may not be absolute, contain `..`, start with `-`, or contain a newline.
+- Paths are literal file names. Git pathspec magic such as `:/` and quoted
+  globs such as `'*.txt'` match nothing and are refused.
+- It works from a subdirectory. Paths are relative to where you run it, and
+  the preview shows them relative to the top of the repo.
 - A named file with no changes is refused instead of being silently skipped.
+
+### Skipping the confirmation step
+
+Setting `AGENT_COMMIT_AUTOTRUST=1` makes every run print the preview and then
+commit straight away, with no token round trip. Only the exact value `1`
+counts. Anything else, or unset, keeps the two-step. `--yes` still wins, so a
+wrong or stale token is refused as usual.
+
+It is best set per agent rather than exported from your shell profile. Some
+agent harnesses, Claude Code among them, build each command's shell from
+your profile, so an exported value can come back after you `unset` it. An
+alias on the launch command keeps it to the agent you trust:
+
+```sh
+alias claude='AGENT_COMMIT_AUTOTRUST=1 claude'
+```
+
+Arguments pass through the alias as normal. A new or unproven model started
+some other way keeps the confirmation step without you having to remember
+anything. Aliases only exist in interactive shells, so an agent started from
+a script will not get the variable either.
+
+`--trusted-model` does the same for a single run, when you are happy to trust
+one particular session. Neither the variable nor the flag appears in
+`--help`.
+
+Neither is a lock. Any agent can type `AGENT_COMMIT_AUTOTRUST=1` or
+`--trusted-model` into its own command. The two-step is a speed bump for
+well-meaning but erratic models, not a defence against a hostile one.
 
 ### SAFETY_MODE
 
 `SAFETY_MODE` is an in-file constant near the top of `agent-commit`. Setting it
-to `off` skips the preview/token step and commits immediately. It is not an
-environment variable or command-line option, so changing it is a deliberate
-human edit rather than something an agent can add to an invocation.
+to `off` skips the preview/token step and commits immediately for every run,
+whatever the environment. Use `AGENT_COMMIT_AUTOTRUST` for per-agent trust.
 
 ### Exit codes
 

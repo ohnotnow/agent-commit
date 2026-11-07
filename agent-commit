@@ -39,18 +39,24 @@
 # Requirements: /bin/bash 3.2+, git 2.x. Nothing else.
 #
 # SAFETY_MODE: set to "off" to skip the preview/token two-step, so a bare
-# run commits immediately. This is deliberately an in-file constant rather
-# than an env var or flag: switching it off should be a loud, human act,
-# not something an agent can flip inline on the command it runs.
+# run commits immediately, for everyone, always.
 #
-# --trusted-model: deliberately absent from --help. Prints the same preview
-# block, then commits without the token round trip. The idea is that a human
-# mentions it in-session only when the model at the keyboard has earned it;
-# an erratic model that is never told about it never goes looking for it.
-# --yes still takes precedence, so a stale token is refused as usual.
+# AGENT_COMMIT_AUTOTRUST=1 and --trusted-model: both print the same preview
+# block, then commit without the token round trip. The env var is meant to
+# be set per agent, e.g. alias claude='AGENT_COMMIT_AUTOTRUST=1 claude', so
+# a trusted agent skips the step while a new or unproven one keeps it. Only
+# the exact value '1' counts. --trusted-model does the same for one run.
+# Neither is a lock: any agent can type either one inline. The two-step is
+# a speed bump for well-meaning but erratic models, not a defence against
+# a hostile one. Both are left out of --help so an agent is not invited to
+# reach for them. --yes still takes precedence, so a stale token is refused.
 SAFETY_MODE="on"
 
 PROG="agent-commit"
+
+# Every path is a literal file name: no ':/' (whole repo), no globs, no
+# other pathspec magic slipping past the explicit-files-only rule.
+export GIT_LITERAL_PATHSPECS=1
 NL='
 '
 
@@ -182,30 +188,6 @@ for f in "${FILES[@]}"; do
 done
 FILES=("${DEDUPED[@]}")
 
-# A staged rename must be committed whole: a pathspec-limited commit that
-# names only one side records half of it, and the old path silently
-# survives in HEAD. Refuse unless both paths (or neither) are named.
-ALL_STATUS=$(git status --porcelain)
-while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "${line:0:2}" in *R*) ;; *) continue ;; esac
-    rest=${line:3}
-    case "$rest" in *' -> '*) ;; *) continue ;; esac
-    r_old=${rest%% -> *}
-    r_new=${rest##* -> }
-    has_old=0
-    has_new=0
-    for f in "${FILES[@]}"; do
-        [ "$f" = "$r_old" ] && has_old=1
-        [ "$f" = "$r_new" ] && has_new=1
-    done
-    if [ $has_old -ne $has_new ]; then
-        die "'$r_old' -> '$r_new' is a rename: name both paths so the whole rename is committed"
-    fi
-done <<EOF
-$ALL_STATUS
-EOF
-
 LABELS=()
 for f in "${FILES[@]}"; do
     case "$f" in
@@ -235,6 +217,45 @@ for f in "${FILES[@]}"; do
         *)     LABELS=("${LABELS[@]}" "modified") ;;
     esac
 done
+
+# Checks so far ran from the caller's directory, where the arguments make
+# sense. From here on everything works from the top of the repo, because
+# that is what 'git status --porcelain' paths are relative to wherever it
+# runs. Without this, running from a subdirectory matched neither side of
+# a staged rename and let half of it through.
+PREFIX=$(git rev-parse --show-prefix)
+if [ -n "$PREFIX" ]; then
+    REL=()
+    for f in "${FILES[@]}"; do
+        REL=("${REL[@]}" "$PREFIX$f")
+    done
+    FILES=("${REL[@]}")
+fi
+cd "$(git rev-parse --show-toplevel)" || die 'cannot cd to the top of the repo'
+
+# A staged rename must be committed whole: a pathspec-limited commit that
+# names only one side records half of it, and the old path silently
+# survives in HEAD. Refuse unless both paths (or neither) are named.
+ALL_STATUS=$(git status --porcelain)
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "${line:0:2}" in *R*) ;; *) continue ;; esac
+    rest=${line:3}
+    case "$rest" in *' -> '*) ;; *) continue ;; esac
+    r_old=${rest%% -> *}
+    r_new=${rest##* -> }
+    has_old=0
+    has_new=0
+    for f in "${FILES[@]}"; do
+        [ "$f" = "$r_old" ] && has_old=1
+        [ "$f" = "$r_new" ] && has_new=1
+    done
+    if [ $has_old -ne $has_new ]; then
+        die "'$r_old' -> '$r_new' is a rename: name both paths so the whole rename is committed"
+    fi
+done <<EOF
+$ALL_STATUS
+EOF
 
 # -------------------------------------------------------------------- token
 
@@ -353,6 +374,8 @@ elif [ "$SAFETY_MODE" = "off" ]; then
     commit_now 'SAFETY_MODE is off'
 elif [ $TRUSTED -eq 1 ]; then
     commit_now '--trusted-model given'
+elif [ "${AGENT_COMMIT_AUTOTRUST:-}" = "1" ]; then
+    commit_now 'AGENT_COMMIT_AUTOTRUST=1'
 else
     printf '%s — preview only, nothing committed yet\n\n' "$PROG"
     print_plan

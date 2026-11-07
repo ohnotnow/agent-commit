@@ -11,6 +11,10 @@
 # committing paths that no longer exist on disk. AI-attribution refusals
 # added July 2026.
 
+# The suite is often run from a session where autotrust is switched on;
+# every preview below would quietly turn into a commit.
+unset AGENT_COMMIT_AUTOTRUST
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 AC="$HERE/agent-commit"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/agent-commit-tests.XXXXXX") || exit 1
@@ -141,6 +145,10 @@ r "refuses absolute path"          1 -m 'fix: x' /etc/hosts
 r "refuses nonexistent path"       1 -m 'fix: x' no-such-file.txt
 r "refuses unchanged tracked file" 1 -m 'fix: x' 'spaced name.txt'
 r "refuses dash path after --"     1 -m 'fix: x' -- -rf
+# git pathspec magic must not sneak past "explicit files only": ':/' is
+# the whole repo to git, and a quoted glob matches many files.
+r "refuses ':/' pathspec magic"    1 -m 'fix: x' ':/'
+r "refuses a quoted glob"          1 -m 'fix: x' '*.txt'
 
 # conventional-commit variants that SHOULD pass the message gate
 OUT=$("$AC" -m 'feat!: breaking thing' a.txt 2>&1); RC=$?
@@ -299,6 +307,59 @@ BEFORE=$(git rev-parse HEAD)
 OUT=$("$AC" -m 'fix: x' --trusted-model --yes deadbeef a.txt 2>&1); RC=$?
 check "--trusted-model with a wrong --yes still refused" 2 "$RC"
 [ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "trusted + wrong token: no commit" || fail "trusted + wrong token: COMMITTED"
+
+# ------------------------------------------------- AGENT_COMMIT_AUTOTRUST
+# Set to exactly 1 (typically via an alias on the trusted agent's launch
+# command), it behaves like --trusted-model on every run. Anything else
+# keeps the preview/token step. --yes still wins over it.
+printf 'autotrust\n' > a.txt
+OUT=$(AGENT_COMMIT_AUTOTRUST=1 "$AC" -m 'fix: autotrust commits straight away' a.txt 2>&1); RC=$?
+check        "AUTOTRUST=1 commits immediately" 0 "$RC"
+contains     "AUTOTRUST=1 announces itself" "$OUT" "AGENT_COMMIT_AUTOTRUST=1"
+contains     "AUTOTRUST=1 still prints the plan" "$OUT" "modified  a.txt"
+NEWSUBJ=$(git log -1 --format=%s)
+[ "$NEWSUBJ" = "fix: autotrust commits straight away" ] && pass "autotrust commit landed" || fail "autotrust commit missing"
+
+printf 'autotrust again\n' > a.txt
+BEFORE=$(git rev-parse HEAD)
+for v in yes true 0 ''; do
+    OUT=$(AGENT_COMMIT_AUTOTRUST="$v" "$AC" -m 'fix: x' a.txt 2>&1); RC=$?
+    check    "AUTOTRUST='$v' only previews" 0 "$RC"
+    contains "AUTOTRUST='$v' prints a token" "$OUT" "--yes"
+done
+[ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "non-1 autotrust: no commit" || fail "non-1 autotrust: COMMITTED"
+
+OUT=$(AGENT_COMMIT_AUTOTRUST=1 "$AC" -m 'fix: x' --yes deadbeef a.txt 2>&1); RC=$?
+check "AUTOTRUST=1 with a wrong --yes still refused" 2 "$RC"
+[ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "autotrust + wrong token: no commit" || fail "autotrust + wrong token: COMMITTED"
+
+OUT=$("$AC" --help 2>&1)
+not_contains "--help does not advertise AUTOTRUST" "$OUT" "AUTOTRUST"
+
+# ------------------------------------------------------------ subdirectory
+# git status --porcelain prints repo-root paths; arguments are relative
+# to the cwd. Run from a subdirectory, the rename guard used to match
+# neither side and let half a rename through.
+mkdir -p deep
+printf 'deep\n' > deep/old.txt
+git add deep/old.txt
+git commit -qm 'base for subdir tests'
+git mv deep/old.txt deep/new.txt
+BEFORE=$(git rev-parse HEAD)
+OUT=$(cd deep && "$AC" -m 'fix: half a rename from a subdir' new.txt 2>&1); RC=$?
+check    "subdir: refuses half a rename" 1 "$RC"
+contains "subdir: rename refusal explains itself" "$OUT" "name both paths"
+[ "$(git rev-parse HEAD)" = "$BEFORE" ] && pass "subdir half rename: no commit" || fail "subdir half rename: COMMITTED"
+
+OUT=$(cd deep && "$AC" -m 'refactor: rename from a subdir' old.txt new.txt 2>&1); RC=$?
+check        "subdir: whole rename previews" 0 "$RC"
+not_contains "subdir: own files not listed as leftovers" "$OUT" "deep/old.txt -> deep/new.txt"
+STOKEN=$(printf '%s\n' "$OUT" | sed -n 's/.*--yes \([0-9a-f]\{8\}\)$/\1/p')
+OUT=$(cd deep && "$AC" -m 'refactor: rename from a subdir' --yes "$STOKEN" old.txt new.txt 2>&1); RC=$?
+check "subdir: whole rename commits" 0 "$RC"
+TREE=$(git ls-tree -r --name-only HEAD)
+contains     "subdir: new path in HEAD" "$TREE" "deep/new.txt"
+not_contains "subdir: old path gone from HEAD" "$TREE" "deep/old.txt"
 
 # ------------------------------------------------------------- closed pipe
 # Reported by an agent in September 2026: 'agent-commit --trusted-model
