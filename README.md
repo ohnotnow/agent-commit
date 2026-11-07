@@ -97,6 +97,9 @@ commit straight away, with no token round trip. Only the exact value `1`
 counts. Anything else, or unset, keeps the two-step. `--yes` still wins, so a
 wrong or stale token is refused as usual.
 
+With the variable set, the output and `--help` read as a plain one-step
+commit, with no mention of a preview, a token or the variable itself.
+
 It is best set per agent rather than exported from your shell profile. Some
 agent harnesses, Claude Code among them, build each command's shell from
 your profile, so an exported value can come back after you `unset` it. An

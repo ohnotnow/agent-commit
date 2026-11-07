@@ -310,13 +310,18 @@ check "--trusted-model with a wrong --yes still refused" 2 "$RC"
 
 # ------------------------------------------------- AGENT_COMMIT_AUTOTRUST
 # Set to exactly 1 (typically via an alias on the trusted agent's launch
-# command), it behaves like --trusted-model on every run. Anything else
-# keeps the preview/token step. --yes still wins over it.
+# command), every run commits straight away. Anything else keeps the
+# preview/token step. --yes still wins over it. Its output reads as a
+# plain one-step commit: nothing hints that a preview step exists, so the
+# agent has no reason to think about it.
 printf 'autotrust\n' > a.txt
 OUT=$(AGENT_COMMIT_AUTOTRUST=1 "$AC" -m 'fix: autotrust commits straight away' a.txt 2>&1); RC=$?
 check        "AUTOTRUST=1 commits immediately" 0 "$RC"
-contains     "AUTOTRUST=1 announces itself" "$OUT" "AGENT_COMMIT_AUTOTRUST=1"
 contains     "AUTOTRUST=1 still prints the plan" "$OUT" "modified  a.txt"
+contains     "AUTOTRUST=1 reports the commit" "$OUT" "committed 1 file(s)"
+not_contains "AUTOTRUST=1 does not name itself" "$OUT" "AUTOTRUST"
+not_contains "AUTOTRUST=1 does not say immediately" "$OUT" "immediately"
+not_contains "AUTOTRUST=1 does not mention a preview" "$OUT" "preview"
 NEWSUBJ=$(git log -1 --format=%s)
 [ "$NEWSUBJ" = "fix: autotrust commits straight away" ] && pass "autotrust commit landed" || fail "autotrust commit missing"
 
@@ -335,6 +340,13 @@ check "AUTOTRUST=1 with a wrong --yes still refused" 2 "$RC"
 
 OUT=$("$AC" --help 2>&1)
 not_contains "--help does not advertise AUTOTRUST" "$OUT" "AUTOTRUST"
+OUT=$(AGENT_COMMIT_AUTOTRUST=1 "$AC" --help 2>&1); RC=$?
+check        "AUTOTRUST=1 --help exits 0" 0 "$RC"
+contains     "AUTOTRUST=1 --help shows usage" "$OUT" "explicit files"
+not_contains "AUTOTRUST=1 --help names no variable" "$OUT" "AUTOTRUST"
+not_contains "AUTOTRUST=1 --help mentions no preview" "$OUT" "preview"
+not_contains "AUTOTRUST=1 --help mentions no token" "$OUT" "token"
+not_contains "AUTOTRUST=1 --help mentions no --yes" "$OUT" "--yes"
 
 # ------------------------------------------------------------ subdirectory
 # git status --porcelain prints repo-root paths; arguments are relative
@@ -373,6 +385,11 @@ OUT=$("$AC" -m 'fix: trusted model survives a closed pipe' --trusted-model a.txt
 contains "trusted-model | head -1 still announces" "$OUT" "committing immediately"
 NEWSUBJ=$(git log -1 --format=%s)
 [ "$NEWSUBJ" = "fix: trusted model survives a closed pipe" ] && pass "trusted-model | head -1: commit landed" || fail "trusted-model | head -1: commit missing"
+
+printf 'piped autotrust\n' > a.txt
+AGENT_COMMIT_AUTOTRUST=1 "$AC" -m 'fix: autotrust survives a closed pipe' a.txt 2>/dev/null | head -1 >/dev/null
+NEWSUBJ=$(git log -1 --format=%s)
+[ "$NEWSUBJ" = "fix: autotrust survives a closed pipe" ] && pass "autotrust | head -1: commit landed" || fail "autotrust | head -1: commit missing"
 
 printf 'piped yes\n' > a.txt
 OUT=$("$AC" -m 'fix: confirmed commit survives a closed pipe' a.txt 2>&1)
