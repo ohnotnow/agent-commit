@@ -373,6 +373,23 @@ TREE=$(git ls-tree -r --name-only HEAD)
 contains     "subdir: new path in HEAD" "$TREE" "deep/new.txt"
 not_contains "subdir: old path gone from HEAD" "$TREE" "deep/old.txt"
 
+# ------------------------------------------------------ untracked directory
+# Reported by an agent in November 2026: after committing every file in a
+# new folder, "left untouched" still listed '?? fresh/'. Plain
+# 'git status --porcelain' folds an untracked folder into one line, which
+# never matches a named file, so the folder showed up as a leftover.
+mkdir -p fresh
+printf 'x\n' > fresh/x.md
+printf 'y\n' > fresh/y.md
+OUT=$("$AC" -m 'docs: whole new folder' fresh/x.md fresh/y.md 2>&1); RC=$?
+check        "new folder: previews" 0 "$RC"
+not_contains "new folder: not listed as a leftover" "$OUT" "?? fresh"
+OUT=$("$AC" -m 'docs: half a new folder' fresh/x.md 2>&1); RC=$?
+check        "half a new folder: previews" 0 "$RC"
+contains     "half a new folder: unnamed file is a leftover" "$OUT" "?? fresh/y.md"
+not_contains "half a new folder: named file is not a leftover" "$OUT" "?? fresh/x.md"
+mv fresh "$WORK/fresh"
+
 # ------------------------------------------------------------- closed pipe
 # Reported by an agent in September 2026: 'agent-commit --trusted-model
 # ... | head' printed "committing immediately", was SIGPIPE'd part way
